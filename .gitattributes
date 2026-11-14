@@ -1,0 +1,126 @@
+# =============================================================================
+# coblang — Root .gitattributes
+# =============================================================================
+
+# Default: auto-detect text files and normalize line endings to LF in the index
+* text=auto eol=lf
+
+# -----------------------------------------------------------------------------
+# Rust & Cargo
+# -----------------------------------------------------------------------------
+*.rs         text eol=lf diff=rust
+Cargo.toml   text eol=lf
+Cargo.lock   text eol=lf linguist-generated=true
+*.toml       text eol=lf
+
+# -----------------------------------------------------------------------------
+# C / C++ / LLVM / CMake
+# -----------------------------------------------------------------------------
+*.c              text eol=lf diff=cpp
+*.h              text eol=lf diff=cpp
+*.cpp            text eol=lf diff=cpp
+*.hpp            text eol=lf diff=cpp
+*.cc             text eol=lf diff=cpp
+*.hh             text eol=lf diff=cpp
+*.cxx            text eol=lf diff=cpp
+*.hxx            text eol=lf diff=cpp
+*.ll             text eol=lf
+*.td             text eol=lf
+*.mlir           text eol=lf
+CMakeLists.txt   text eol=lf
+*.cmake          text eol=lf
+Makefile         text eol=lf
+GNUmakefile      text eol=lf
+*.mk             text eol=lf
+
+# -----------------------------------------------------------------------------
+# COBOL Source Files & Copybooks
+# -----------------------------------------------------------------------------
+*.cob   text eol=lf linguist-language=COBOL
+*.COB   text eol=lf linguist-language=COBOL
+*.cbl   text eol=lf linguist-language=COBOL
+*.CBL   text eol=lf linguist-language=COBOL
+*.cpy   text eol=lf linguist-language=COBOL
+*.CPY   text eol=lf linguist-language=COBOL
+*.pco   text eol=lf linguist-language=COBOL
+
+# Preserve exact bytes on any explicit CRLF test fixtures
+*.crlf.* -text
+
+# -----------------------------------------------------------------------------
+# Ported Test Manifest Bundles, Expectations & Scoreboards
+# -----------------------------------------------------------------------------
+# Manifest bundles are deterministic LF-delimited TSV documents; mark generated
+# and vendored so GitHub Linguist reports compiler/tooling language accurately.
+*.bundle                            text eol=lf linguist-generated=true
+tests/ported/**                     linguist-vendored=true
+tests/expectations/baseline.toml    text eol=lf linguist-generated=true
+tests/expectations/SCOREBOARD.json  text eol=lf linguist-generated=true
+tests/expectations/SCOREBOARD.md    text eol=lf linguist-generated=true
+
+# -----------------------------------------------------------------------------
+# Scripts, CI Workflows, Config & Documentation
+# -----------------------------------------------------------------------------
+*.sh            text eol=lf
+*.bash          text eol=lf
+*.zsh           text eol=lf
+*.py            text eol=lf diff=python
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.json          text eol=lf
+*.jsonc         text eol=lf
+*.md            text eol=lf diff=markdown
+*.txt           text eol=lf
+LICENSE*        text eol=lf
+.gitignore      text eol=lf
+.gitattributes  text eol=lf
+.editorconfig   text eol=lf
+
+# Windows scripts require CRLF
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# -----------------------------------------------------------------------------
+# Binary & Archive Formats (never perform newline conversion or text diffs)
+# -----------------------------------------------------------------------------
+*.gz      binary
+*.tgz     binary
+*.xz      binary
+*.bz2     binary
+*.zst     binary
+*.Z       binary
+*.zip     binary
+*.7z      binary
+*.tar     binary
+
+*.o       binary
+*.obj     binary
+*.a       binary
+*.lib     binary
+*.so      binary
+*.dylib   binary
+*.dll     binary
+*.exe     binary
+*.wasm    binary
+*.bc      binary
+*.pdb     binary
+*.profraw binary
+*.profdata binary
+
+*.ebcdic  binary
+*.bin     binary
+*.dat     binary
+*.idx     binary
+
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.webp    binary
+*.ico     binary
+*.pdf     binary
+*.woff    binary
+*.woff2   binary
+*.ttf     binary
+*.otf     binary

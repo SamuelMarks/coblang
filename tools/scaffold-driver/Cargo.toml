@@ -1,0 +1,33 @@
+[package]
+name = "coblang-scaffold-driver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Minimal zero-compiler scaffold CLI driver and compatibility shims (coblang, cobc, cobcrun, gcobol)."
+
+[lib]
+name = "coblang_scaffold_driver"
+path = "src/lib.rs"
+
+[[bin]]
+name = "coblang"
+path = "src/bin/coblang.rs"
+
+[[bin]]
+name = "cobc-shim"
+path = "src/bin/cobc_shim.rs"
+
+[[bin]]
+name = "cobcrun-shim"
+path = "src/bin/cobcrun_shim.rs"
+
+[[bin]]
+name = "gcobol-shim"
+path = "src/bin/gcobol_shim.rs"
+
+[dependencies]
+coblang-common.workspace = true
+
+[lints]
+workspace = true

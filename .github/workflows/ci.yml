@@ -1,0 +1,383 @@
+name: CI & Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Formatting, Clippy, Rustdoc, Doc-Argument & Clean-Room Lints
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint (fmt, clippy, rustdoc, clean-room)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting (rustfmt)
+        run: cargo fmt --all -- --check
+
+      - name: Check strict Clippy lints
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Check Rustdoc (including private items)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --document-private-items --locked
+
+      - name: Check file-header & function-argument doc coverage
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys
+
+          root = pathlib.Path(".")
+          rs_files = (
+              list(root.glob("src/**/*.rs"))
+              + list(root.glob("tools/**/*.rs"))
+              + list(root.glob("tests/**/*.rs"))
+          )
+          fn_re = re.compile(
+              r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?fn\s+([A-Za-z0-9_]+)\s*(?:<[^>]*>)?\s*\((.*)"
+          )
+          errors = []
+          for path in sorted(rs_files):
+              lines = path.read_text(encoding="utf-8").splitlines()
+              if not lines or not lines[0].startswith("//!"):
+                  errors.append(f"{path}:1: missing `//!` file/module documentation header")
+              is_test_file = path.parts[0] == "tests" or "tests" in path.parts
+              i = 0
+              while i < len(lines):
+                  m = fn_re.match(lines[i])
+                  if m:
+                      fn_name = m.group(1)
+                      sig_lines = [lines[i]]
+                      j = i
+                      while ")" not in lines[j] and j + 1 < len(lines):
+                          j += 1
+                          sig_lines.append(lines[j])
+                      sig = " ".join(sig_lines)
+                      params_part = sig.split("(", 1)[1].rsplit(")", 1)[0].strip()
+                      k = i - 1
+                      doc_lines = []
+                      has_test_attr = False
+                      while k >= 0:
+                          stripped = lines[k].strip()
+                          if stripped.startswith("///"):
+                              doc_lines.append(stripped)
+                          elif stripped.startswith("#["):
+                              if "test" in stripped:
+                                  has_test_attr = True
+                          else:
+                              break
+                          k -= 1
+                      doc_text = chr(10).join(reversed(doc_lines))
+                      if not doc_lines:
+                          errors.append(f"{path}:{i+1}: function `{fn_name}` is missing `///` doc comment")
+                      if not is_test_file and not has_test_attr and params_part:
+                          raw_params, depth, cur = [], 0, []
+                          for ch in params_part:
+                              if ch in "([<":
+                                  depth += 1
+                              elif ch in ")]>":
+                                  depth -= 1
+                              if ch == "," and depth == 0:
+                                  tok = "".join(cur).strip()
+                                  if tok:
+                                      raw_params.append(tok)
+                                  cur = []
+                              else:
+                                  cur.append(ch)
+                          tail = "".join(cur).strip()
+                          if tail:
+                              raw_params.append(tail)
+                          arg_names = []
+                          for rp in raw_params:
+                              if rp in ("self", "&self", "&mut self", "mut self"):
+                                  continue
+                              if ":" in rp:
+                                  lhs = rp.split(":", 1)[0].strip().removeprefix("mut ").strip()
+                                  if lhs and lhs != "_":
+                                      arg_names.append(lhs)
+                          if arg_names:
+                              if "# Arguments" not in doc_text:
+                                  errors.append(
+                                      f"{path}:{i+1}: function `{fn_name}` takes parameters {arg_names} but lacks `# Arguments` section"
+                                  )
+                              for arg in arg_names:
+                                  if f"`{arg}`" not in doc_text:
+                                      errors.append(
+                                          f"{path}:{i+1}: function `{fn_name}` does not document parameter `{arg}`"
+                                      )
+                      i = j + 1
+                  else:
+                      i += 1
+          if errors:
+              for err in errors:
+                  print(err, file=sys.stderr)
+              sys.exit(1)
+          PY
+
+      - name: Check GPLv3 clean-room boundary
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys
+
+          forbidden = re.compile(r'include_(?:str|bytes)!\s*\([^)]*ported/')
+          for path in list(pathlib.Path("src").rglob("*.rs")) + list(pathlib.Path("tools").rglob("*.rs")):
+              if forbidden.search(path.read_text(encoding="utf-8")):
+                  print(f"Clean-room violation in {path}: compiler/tooling embeds ported GPLv3 test data", file=sys.stderr)
+                  sys.exit(1)
+          PY
+
+      - name: Verify README.md '% doc coverage' shield
+        run: python3 scripts/update-readme-shields.py --metric doc --readme README.md --check
+
+  # ---------------------------------------------------------------------------
+  # 2. Cross-Platform Workspace Tests & Ported Conformance Suite Ratchet
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install host oracle & C companion dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang gnucobol
+
+      - name: Install host oracle dependencies (macOS)
+        if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: brew install gnucobol
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cache verified upstream COBOL test archives
+        uses: actions/cache@v6
+        with:
+          path: .upstream-cache
+          key: upstream-tests-v1-${{ hashFiles('scripts/fetch-upstream-tests.sh') }}
+
+      - name: Fetch & cryptographically verify upstream test suites
+        run: ./scripts/fetch-upstream-tests.sh
+
+      - name: Run workspace unit & integration tests
+        run: cargo test --workspace --all-targets --locked
+
+      - name: Run full ported test suite with expectation ratchet
+        run: cargo run --locked -p coblang-test-runner --bin coblang-test -- run --bundle-dir tests --baseline tests/expectations/baseline.toml --ratchet -j 8
+
+  # ---------------------------------------------------------------------------
+  # 3. Full 7-Gate Quality Script & 100% Function/Line/Branch Coverage Gate
+  # ---------------------------------------------------------------------------
+  coverage:
+    name: Quality Gate & 100% Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install host oracle & C companion dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang gnucobol
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install Rust nightly toolchain (for branch coverage)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cache verified upstream COBOL test archives
+        uses: actions/cache@v6
+        with:
+          path: .upstream-cache
+          key: upstream-tests-v1-${{ hashFiles('scripts/fetch-upstream-tests.sh') }}
+
+      - name: Fetch & cryptographically verify upstream test suites
+        run: ./scripts/fetch-upstream-tests.sh
+
+      - name: Execute full 7-step quality & 100% coverage gate
+        run: ./scripts/check-quality.sh
+
+      - name: Verify README.md '% test coverage' shield
+        run: python3 scripts/update-readme-shields.py --metric test --readme README.md --check
+
+  # ---------------------------------------------------------------------------
+  # 4. Build Release Binaries (runs on v* tags after lint, test & coverage pass)
+  # ---------------------------------------------------------------------------
+  build-release:
+    name: Build Release (${{ matrix.target }})
+    needs:
+      - lint
+      - test
+      - coverage
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross_pkg: gcc-aarch64-linux-gnu
+            linker_env: CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install cross-compilation toolchain
+        if: matrix.cross_pkg != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ matrix.cross_pkg }}
+
+      - name: Install Rust stable toolchain for ${{ matrix.target }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build workspace binaries (--release --locked)
+        run: |
+          if [[ -n "${{ matrix.linker_env }}" ]]; then
+            export "${{ matrix.linker_env }}"
+          fi
+          cargo build --workspace --bins --release --locked --target "${{ matrix.target }}"
+
+      - name: Package release archive & SHA-256 checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          TARGET="${{ matrix.target }}"
+          PKG_NAME="coblang-${TAG}-${TARGET}"
+          STAGE_DIR="dist/${PKG_NAME}"
+
+          mkdir -p "${STAGE_DIR}/bin"
+          for bin in coblang cobc-shim cobcrun-shim gcobol-shim coblang-test; do
+            cp "target/${TARGET}/release/${bin}" "${STAGE_DIR}/bin/"
+            chmod 0755 "${STAGE_DIR}/bin/${bin}"
+          done
+
+          for doc in LICENSE LICENSE-APACHE README.md tests/LICENSE_MANIFEST.md; do
+            if [[ -f "${doc}" ]]; then
+              cp "${doc}" "${STAGE_DIR}/"
+            fi
+          done
+
+          tar -C dist -czf "dist/${PKG_NAME}.tar.gz" "${PKG_NAME}"
+          (
+            cd dist
+            shasum -a 256 "${PKG_NAME}.tar.gz" > "${PKG_NAME}.tar.gz.sha256"
+          )
+
+      - name: Upload release artifact (${{ matrix.target }})
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 5. Publish GitHub Release (runs on v* tags after all targets build cleanly)
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    needs:
+      - build-release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all target release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate combined SHA256SUMS.txt
+        run: |
+          cd release-assets
+          shasum -a 256 *.tar.gz | sort -k2 > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: coblang ${{ github.ref_name }}
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/*.tar.gz
+            release-assets/*.tar.gz.sha256
+            release-assets/SHA256SUMS.txt

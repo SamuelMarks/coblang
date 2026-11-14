@@ -1,0 +1,84 @@
+# =============================================================================
+# coblang — pre-commit configuration (https://pre-commit.com)
+# =============================================================================
+minimum_pre_commit_version: "3.2.0"
+default_install_hook_types:
+  - pre-commit
+fail_fast: false
+
+repos:
+  # ---------------------------------------------------------------------------
+  # General repository hygiene & config validation
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-yaml
+      - id: check-toml
+        exclude: ^tests/expectations/baseline\.toml$
+      - id: check-json
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+        exclude: (\.(bat|cmd|ps1)$|\.crlf\.)
+      - id: end-of-file-fixer
+        exclude: (^tests/expectations/SCOREBOARD\.json$|\.bundle$)
+      - id: trailing-whitespace
+        exclude: (\.bundle$|^tests/expectations/baseline\.toml$|\.md$|\.(cob|COB|cbl|CBL|cpy|CPY|pco)$)
+
+  # ---------------------------------------------------------------------------
+  # Rust & coblang workspace gates + README coverage shields
+  # ---------------------------------------------------------------------------
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: Format & recheck Rust code (cargo fmt)
+        description: Auto-formats all Rust code with `cargo fmt`, then re-verifies formatting with `--check`.
+        entry: bash -c 'cargo fmt --all && cargo fmt --all -- --check'
+        language: system
+        types: [rust]
+        pass_filenames: false
+        always_run: true
+
+      - id: cargo-build
+        name: Build workspace (cargo build)
+        description: Builds all workspace library, binary, and test targets.
+        entry: cargo build --workspace --all-targets --locked
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: cargo-lint
+        name: Lint workspace (clippy, rustdoc, doc-args, clean-room)
+        description: Enforces strict Clippy, Rustdoc, 100% file/arg docs, and GPLv3 clean-room isolation.
+        entry: ./scripts/precommit-lint.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: cargo-test
+        name: Test workspace & ported suite ratchet (cargo test)
+        description: Runs all unit/integration tests and the 2,527-test conformance ratchet.
+        entry: bash -c 'cargo test --workspace --all-targets --locked && cargo run --quiet --locked -p coblang-test-runner --bin coblang-test -- run --bundle-dir tests --baseline tests/expectations/baseline.toml --ratchet -j 8'
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: readme-doc-coverage-shield
+        name: Add/update '% doc coverage' shield in README.md
+        description: Computes workspace documentation coverage % and adds/updates the shield in README.md.
+        entry: python3 scripts/update-readme-shields.py --metric doc --readme README.md
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: readme-test-coverage-shield
+        name: Add/update '% test coverage' shield in README.md
+        description: Computes workspace function/line/branch test coverage % and adds/updates the shield in README.md.
+        entry: python3 scripts/update-readme-shields.py --metric test --readme README.md
+        language: system
+        pass_filenames: false
+        always_run: true

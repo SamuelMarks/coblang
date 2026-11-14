@@ -1,0 +1,65 @@
+[workspace]
+resolver = "2"
+members = [
+    ".",
+    "tools/scaffold-driver",
+    "tools/test-runner",
+    "tools/test-importer",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 WITH LLVM-exception"
+publish = false
+
+[workspace.dependencies]
+coblang-common = { path = "." }
+coblang-scaffold-driver = { path = "tools/scaffold-driver" }
+coblang-test-runner = { path = "tools/test-runner" }
+coblang-test-importer = { path = "tools/test-importer" }
+derive_more = { version = "2.0.1", default-features = false, features = ["display", "error", "from"] }
+regex = "1.11"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "forbid"
+unused_qualifications = "deny"
+unreachable_pub = "deny"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "forbid"
+private_intra_doc_links = "forbid"
+missing_crate_level_docs = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "forbid"
+expect_used = "forbid"
+panic = "deny"
+todo = "forbid"
+unimplemented = "forbid"
+dbg_macro = "forbid"
+missing_docs_in_private_items = "deny"
+missing_errors_doc = "deny"
+missing_panics_doc = "deny"
+
+[package]
+name = "coblang-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Shared strongly-typed domain model and unified error enum for coblang test tooling."
+
+[dependencies]
+derive_more.workspace = true
+
+[dev-dependencies]
+coblang-scaffold-driver.workspace = true
+coblang-test-runner.workspace = true
+coblang-test-importer.workspace = true
+
+[lints]
+workspace = true

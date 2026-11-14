@@ -1,0 +1,86 @@
+# =============================================================================
+# coblang — Root .editorconfig
+# https://editorconfig.org
+# =============================================================================
+
+root = true
+
+# Default settings across all text files
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 4
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# Rust sources (matches rustfmt defaults)
+[*.rs]
+indent_style = space
+indent_size = 4
+max_line_length = 100
+
+# Cargo & general TOML configuration
+[*.toml]
+indent_style = space
+indent_size = 4
+
+# C / C++ sources & headers
+[*.{c,h,cpp,hpp,cc,hh,cxx,hxx}]
+indent_style = space
+indent_size = 4
+
+# LLVM IR, TableGen, MLIR & CMake
+[*.{ll,td,mlir,cmake}]
+indent_style = space
+indent_size = 2
+
+[CMakeLists.txt]
+indent_style = space
+indent_size = 2
+
+# Makefiles require hard tabs
+[{Makefile,GNUmakefile,*.mk}]
+indent_style = tab
+indent_size = 4
+
+# Shell & Python scripts
+[*.{sh,bash,zsh,py}]
+indent_style = space
+indent_size = 4
+
+# YAML & JSON configuration / workflows
+[*.{yml,yaml,json,jsonc}]
+indent_style = space
+indent_size = 2
+
+# Markdown (preserve intentional two-space hard line breaks)
+[*.md]
+indent_style = space
+indent_size = 2
+trim_trailing_whitespace = false
+
+# Windows batch & PowerShell scripts
+[*.{bat,cmd,ps1}]
+end_of_line = crlf
+indent_style = space
+indent_size = 4
+
+# COBOL sources & copybooks (preserve fixed-form 72/80-column card padding)
+[*.{cob,COB,cbl,CBL,cpy,CPY,pco}]
+indent_style = space
+indent_size = 4
+trim_trailing_whitespace = false
+
+# Tab-delimited manifest bundles & expectation baselines (trailing tabs can
+# denote empty final columns and must never be stripped by editors)
+[*.bundle]
+indent_style = tab
+trim_trailing_whitespace = false
+
+[tests/expectations/baseline.toml]
+indent_style = tab
+trim_trailing_whitespace = false
+
+[tests/expectations/SCOREBOARD.json]
+insert_final_newline = false

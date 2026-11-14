@@ -1,0 +1,190 @@
+# =============================================================================
+# coblang — Root .gitignore
+# =============================================================================
+# Note: Cargo.lock is intentionally tracked for reproducible workspace builds.
+
+# -----------------------------------------------------------------------------
+# Rust / Cargo Build Artifacts
+# -----------------------------------------------------------------------------
+/target/
+**/target/
+**/*.rs.bk
+*.pdb
+
+# -----------------------------------------------------------------------------
+# Code Coverage, Profiling, Fuzzing & Benchmarks
+# -----------------------------------------------------------------------------
+*.profraw
+*.profdata
+lcov.info
+cov.json
+cobertura.xml
+/coverage/
+/tarpaulin-report.html
+/tarpaulin-report.json
+perf.data
+perf.data.old
+flamegraph.svg
+*.trace/
+/fuzz/artifacts/
+/fuzz/corpus/
+
+# -----------------------------------------------------------------------------
+# C / C++ / LLVM / CMake / Native Compilation Artifacts
+# -----------------------------------------------------------------------------
+/build/
+/out/
+/cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+_deps/
+.ninja_deps
+.ninja_log
+.cache/
+
+# Object files, static/dynamic libraries, executables & debug symbols
+*.o
+*.obj
+*.ko
+*.elf
+*.a
+*.lib
+*.la
+*.lo
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.wasm
+*.bc
+*.pch
+*.gch
+*.pcm
+*.dSYM/
+*.su
+*.idb
+*.ilk
+*.exp
+a.out
+core
+core.*
+vgcore.*
+
+# -----------------------------------------------------------------------------
+# COBOL Compiler, Shim & Runtime Scratch Artifacts
+# -----------------------------------------------------------------------------
+*.cob.h
+*.cob.c
+*.cob.i
+*.lst
+*.lis
+*.idx
+__db.*
+
+# -----------------------------------------------------------------------------
+# Upstream Test Cache, Test Runner Sandboxes & llvm-lit Outputs
+# -----------------------------------------------------------------------------
+/.upstream-cache/
+/tmp/
+/tests/.tmp/
+/tests/run-artifacts/
+/tests/lit-out/
+**/*.lit.test
+.lit_test_times.txt
+
+# -----------------------------------------------------------------------------
+# Python (llvm-lit & Verification Scripts)
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# -----------------------------------------------------------------------------
+# Release & Distribution Staging
+# -----------------------------------------------------------------------------
+/dist/
+/release/
+*.tar.gz
+*.tar.xz
+*.tar.zst
+*.tgz
+*.zip
+*.sha256
+SHA256SUMS.txt
+
+# -----------------------------------------------------------------------------
+# Editors & IDEs
+# -----------------------------------------------------------------------------
+# VS Code (ignore local state unless shared workspace config is explicitly added)
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# JetBrains (RustRover, CLion, IntelliJ)
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Vim / Neovim
+*.swp
+*.swo
+*.swn
+*~
+.netrwhist
+
+# Emacs / Tags
+*#
+.#*
+TAGS
+GTAGS
+GRTAGS
+GPATH
+
+# Zed / Helix / Sublime
+.zed/
+*.sublime-workspace
+*.sublime-project
+
+# -----------------------------------------------------------------------------
+# Operating System & Filesystem Metadata
+# -----------------------------------------------------------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+
+# Linux
+.directory
+.Trash-*
+.nfs*
+
+# -----------------------------------------------------------------------------
+# Local Environment & Secrets
+# -----------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+.direnv/

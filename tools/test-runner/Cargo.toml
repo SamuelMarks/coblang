@@ -1,0 +1,23 @@
+[package]
+name = "coblang-test-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Unified parallel test runner, diagnostic matcher, and expectation ratchet for coblang."
+
+[lib]
+name = "coblang_test_runner"
+path = "src/lib.rs"
+
+[[bin]]
+name = "coblang-test"
+path = "src/bin/coblang_test.rs"
+
+[dependencies]
+coblang-common.workspace = true
+coblang-scaffold-driver.workspace = true
+regex.workspace = true
+
+[lints]
+workspace = true
