@@ -1,0 +1,16 @@
+[package]
+name = "coblang-rt-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Clean-room pure-Rust COBOL runtime state, display formatting, and intrinsic helpers."
+
+[dependencies]
+coblang-common.workspace = true
+coblang-decimal.workspace = true
+coblang-hir.workspace = true
+coblang-pic.workspace = true
+
+[lints]
+workspace = true

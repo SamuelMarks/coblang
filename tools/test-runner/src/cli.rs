@@ -3,10 +3,13 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use coblang_common::{CoblangError, DriverFlavor, Result, TestManifest, decode_manifest_bundle};
+use coblang_common::{
+    CoblangError, DriverFlavor, FeatureTag, Result, TestManifest, decode_manifest_bundle,
+};
 
 use crate::capabilities::HostCapabilities;
-use crate::engine::{CompilerBackend, RunnerConfig, execute_suite_parallel};
+use crate::engine::{CompilerBackend, RunnerConfig, SandboxRetention, execute_suite_parallel};
+use crate::matcher::DiagnosticMessagePolicy;
 use crate::ratchet::{
     decode_expectations, emit_lit_wrappers, encode_expectations, render_summary_json,
     render_summary_markdown, snapshot_expectations, verify_ratchet,
@@ -14,6 +17,47 @@ use crate::ratchet::{
 
 /// Line-feed character (`0x0A`).
 const LF: char = '\u{000a}';
+
+/// Optional test-selection predicate applied to loaded [`TestManifest`] slices.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ManifestFilter {
+    /// Optional substring required in `TestManifest::id`.
+    pub id_substring: Option<String>,
+    /// Optional taxonomy [`FeatureTag`] required on `TestManifest::feature_tags`.
+    pub required_tag: Option<FeatureTag>,
+}
+
+impl ManifestFilter {
+    /// Returns `true` when `manifest` satisfies all configured filter predicates.
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest` - Candidate test manifest.
+    #[must_use]
+    pub fn matches(&self, manifest: &TestManifest) -> bool {
+        if let Some(sub) = &self.id_substring
+            && !manifest.id.contains(sub.as_str())
+        {
+            return false;
+        }
+        if let Some(tag) = self.required_tag
+            && !manifest.feature_tags.contains(&tag)
+        {
+            return false;
+        }
+        true
+    }
+
+    /// Filters `manifests` in order, retaining only entries matching [`Self::matches`].
+    ///
+    /// # Arguments
+    ///
+    /// * `manifests` - Unfiltered manifest vector.
+    #[must_use]
+    pub fn retain_matching(&self, manifests: Vec<TestManifest>) -> Vec<TestManifest> {
+        manifests.into_iter().filter(|m| self.matches(m)).collect()
+    }
+}
 
 /// Parsed subcommand for the `coblang-test` runner CLI.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +78,8 @@ pub enum RunnerCommand {
         oracle: Option<String>,
         /// Worker thread count.
         jobs: usize,
+        /// Optional test ID and feature-tag filter.
+        filter: ManifestFilter,
     },
     /// Execute a single test by ID from a bundle (used by `llvm-lit`).
     RunOne {
@@ -52,6 +98,8 @@ pub enum RunnerCommand {
         json_output: Option<PathBuf>,
         /// Worker thread count.
         jobs: usize,
+        /// Optional test ID and feature-tag filter.
+        filter: ManifestFilter,
     },
     /// Emit `llvm-lit` `.lit.test` wrapper files for a bundle.
     EmitLit {
@@ -79,10 +127,10 @@ pub fn parse_runner_cli(args: &[String]) -> Result<RunnerCommand> {
     };
     match sub {
         "--help" | "-h" | "help" => Ok(RunnerCommand::Help),
-        "run" => parse_run_subcommand(&args[1..]),
-        "run-one" => parse_run_one_subcommand(&args[1..]),
-        "summary" => parse_summary_subcommand(&args[1..]),
-        "emit-lit" => parse_emit_lit_subcommand(&args[1..]),
+        "run" => parse_run_subcommand(args.get(1..).unwrap_or(&[])),
+        "run-one" => parse_run_one_subcommand(args.get(1..).unwrap_or(&[])),
+        "summary" => parse_summary_subcommand(args.get(1..).unwrap_or(&[])),
+        "emit-lit" => parse_emit_lit_subcommand(args.get(1..).unwrap_or(&[])),
         other => Err(CoblangError::InvalidCli {
             message: format!("unknown coblang-test subcommand `{other}`"),
         }),
@@ -105,10 +153,11 @@ fn parse_run_subcommand(args: &[String]) -> Result<RunnerCommand> {
     let mut ratchet = false;
     let mut oracle = None;
     let mut jobs = 8_usize;
+    let mut filter = ManifestFilter::default();
 
     let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
+    while let Some(arg) = args.get(i).map(String::as_str) {
+        match arg {
             "--bundle" => {
                 i += 1;
                 bundles.push(PathBuf::from(req_arg(args, i, "--bundle")?));
@@ -130,6 +179,15 @@ fn parse_run_subcommand(args: &[String]) -> Result<RunnerCommand> {
             "--oracle" => {
                 i += 1;
                 oracle = Some(req_arg(args, i, "--oracle")?);
+            }
+            "--filter" => {
+                i += 1;
+                filter.id_substring = Some(req_arg(args, i, "--filter")?);
+            }
+            "--tag" => {
+                i += 1;
+                let raw = req_arg(args, i, "--tag")?;
+                filter.required_tag = Some(parse_cli_feature_tag(&raw)?);
             }
             "--jobs" | "-j" => {
                 i += 1;
@@ -158,6 +216,7 @@ fn parse_run_subcommand(args: &[String]) -> Result<RunnerCommand> {
         ratchet,
         oracle,
         jobs,
+        filter,
     })
 }
 
@@ -174,8 +233,8 @@ fn parse_run_one_subcommand(args: &[String]) -> Result<RunnerCommand> {
     let mut bundle = None;
     let mut test_id = None;
     let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
+    while let Some(arg) = args.get(i).map(String::as_str) {
+        match arg {
             "--bundle" => {
                 i += 1;
                 bundle = Some(PathBuf::from(req_arg(args, i, "--bundle")?));
@@ -214,9 +273,10 @@ fn parse_summary_subcommand(args: &[String]) -> Result<RunnerCommand> {
     let mut output = None;
     let mut json_output = None;
     let mut jobs = 8_usize;
+    let mut filter = ManifestFilter::default();
     let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
+    while let Some(arg) = args.get(i).map(String::as_str) {
+        match arg {
             "--bundle" => {
                 i += 1;
                 bundles.push(PathBuf::from(req_arg(args, i, "--bundle")?));
@@ -233,6 +293,15 @@ fn parse_summary_subcommand(args: &[String]) -> Result<RunnerCommand> {
             "--json" => {
                 i += 1;
                 json_output = Some(PathBuf::from(req_arg(args, i, "--json")?));
+            }
+            "--filter" => {
+                i += 1;
+                filter.id_substring = Some(req_arg(args, i, "--filter")?);
+            }
+            "--tag" => {
+                i += 1;
+                let raw = req_arg(args, i, "--tag")?;
+                filter.required_tag = Some(parse_cli_feature_tag(&raw)?);
             }
             "--jobs" | "-j" => {
                 i += 1;
@@ -259,6 +328,22 @@ fn parse_summary_subcommand(args: &[String]) -> Result<RunnerCommand> {
         output,
         json_output,
         jobs,
+        filter,
+    })
+}
+
+/// Parses a [`FeatureTag`] from a `--tag` CLI argument.
+///
+/// # Arguments
+///
+/// * `raw` - Raw taxonomy tag string (e.g. `"stage:preprocess"`).
+///
+/// # Errors
+///
+/// Returns [`CoblangError::InvalidCli`] if `raw` is not a recognized [`FeatureTag`].
+fn parse_cli_feature_tag(raw: &str) -> Result<FeatureTag> {
+    FeatureTag::parse_token(raw, 0).map_err(|_| CoblangError::InvalidCli {
+        message: format!("unknown --tag `{raw}`"),
     })
 }
 
@@ -301,8 +386,8 @@ fn parse_emit_lit_subcommand(args: &[String]) -> Result<RunnerCommand> {
     let mut bundle = None;
     let mut out_dir = None;
     let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
+    while let Some(arg) = args.get(i).map(String::as_str) {
+        match arg {
             "--bundle" => {
                 i += 1;
                 bundle = Some(PathBuf::from(req_arg(args, i, "--bundle")?));
@@ -357,21 +442,21 @@ fn req_arg(args: &[String], idx: usize, flag: &str) -> Result<String> {
 /// Returns [`CoblangError::InvalidCli`] if `oracle` is unrecognized.
 pub fn resolve_oracle_backend(oracle: Option<&str>) -> Result<CompilerBackend> {
     let Some(name) = oracle else {
-        return Ok(CompilerBackend::InProcessScaffold);
+        return Ok(CompilerBackend::InProcessCompiler);
     };
     match name {
         "cobc" => Ok(CompilerBackend::External {
             compiler_bin: PathBuf::from("cobc"),
             cobcrun_bin: Some(PathBuf::from("cobcrun")),
             flavor: DriverFlavor::Cobc,
-            strict_diagnostic_text: false,
+            diagnostic_policy: DiagnosticMessagePolicy::IgnoreMessagePattern,
             compile_timeout_ms: 15_000,
         }),
         "gcobol" => Ok(CompilerBackend::External {
             compiler_bin: PathBuf::from("gcobol"),
             cobcrun_bin: None,
             flavor: DriverFlavor::Gcobol,
-            strict_diagnostic_text: false,
+            diagnostic_policy: DiagnosticMessagePolicy::IgnoreMessagePattern,
             compile_timeout_ms: 15_000,
         }),
         other => Err(CoblangError::InvalidCli {
@@ -380,22 +465,46 @@ pub fn resolve_oracle_backend(oracle: Option<&str>) -> Result<CompilerBackend> {
     }
 }
 
-/// Loads and concatenates [`TestManifest`] entries from multiple bundle files.
+/// Streams and executes `.bundle` files one at a time so decoded workspace file payloads are
+/// dropped between bundles rather than retained across the entire multi-thousand-test suite.
 ///
 /// # Arguments
 ///
-/// * `paths` - Bundle file paths to read and decode.
+/// * `paths` - Bundle file paths to read, filter, and execute sequentially per bundle.
+/// * `filter` - Active [`ManifestFilter`].
+/// * `cfg` - Active [`RunnerConfig`].
+///
+/// # Errors
+///
+/// Propagates bundle I/O, manifest format, or runner execution errors.
+fn execute_bundles_streaming(
+    paths: &[PathBuf],
+    filter: &ManifestFilter,
+    cfg: &RunnerConfig,
+) -> Result<Vec<crate::engine::TestExecutionRecord>> {
+    let mut records = Vec::new();
+    for path in paths {
+        let content = std::fs::read_to_string(path)?;
+        let decoded = decode_manifest_bundle(&content)?;
+        drop(content);
+        let matching = filter.retain_matching(decoded);
+        records.extend(execute_suite_parallel(&matching, cfg)?);
+    }
+    Ok(records)
+}
+
+/// Loads and concatenates [`TestManifest`] entries from a single bundle file.
+///
+/// # Arguments
+///
+/// * `path` - Bundle file path to read and decode.
 ///
 /// # Errors
 ///
 /// Propagates I/O or manifest format errors.
-fn load_bundles(paths: &[PathBuf]) -> Result<Vec<TestManifest>> {
-    let mut all = Vec::new();
-    for p in paths {
-        let content = std::fs::read_to_string(p)?;
-        all.extend(decode_manifest_bundle(&content)?);
-    }
-    Ok(all)
+fn load_single_bundle(path: &Path) -> Result<Vec<TestManifest>> {
+    let content = std::fs::read_to_string(path)?;
+    decode_manifest_bundle(&content)
 }
 
 /// Executes a [`RunnerCommand`] writing output to `stdout`/`stderr` and returning an exit code.
@@ -463,17 +572,17 @@ fn dispatch_command<W: Write>(
             ratchet,
             oracle,
             jobs,
+            filter,
         } => {
-            let manifests = load_bundles(&bundles)?;
             let cfg = RunnerConfig {
                 backend: resolve_oracle_backend(oracle.as_deref())?,
                 sandbox_root: sandbox_root.to_path_buf(),
-                preserve_on_failure: false,
+                sandbox_retention: SandboxRetention::CleanAlways,
                 c_compiler: PathBuf::from("clang"),
                 capabilities: HostCapabilities::detect_host(),
                 jobs,
             };
-            let records = execute_suite_parallel(&manifests, &cfg)?;
+            let records = execute_bundles_streaming(&bundles, &filter, &cfg)?;
             if let Some(base_path) = &write_baseline {
                 let snap = snapshot_expectations(&records);
                 std::fs::write(base_path, encode_expectations(&snap))?;
@@ -489,7 +598,7 @@ fn dispatch_command<W: Write>(
             Ok(())
         }
         RunnerCommand::RunOne { bundle, test_id } => {
-            let manifests = load_bundles(&[bundle])?;
+            let manifests = load_single_bundle(&bundle)?;
             let selected: Vec<TestManifest> =
                 manifests.into_iter().filter(|m| m.id == test_id).collect();
             if selected.is_empty() {
@@ -499,9 +608,9 @@ fn dispatch_command<W: Write>(
                 });
             }
             let cfg = RunnerConfig {
-                backend: CompilerBackend::InProcessScaffold,
+                backend: CompilerBackend::InProcessCompiler,
                 sandbox_root: sandbox_root.to_path_buf(),
-                preserve_on_failure: false,
+                sandbox_retention: SandboxRetention::CleanAlways,
                 c_compiler: PathBuf::from("clang"),
                 capabilities: HostCapabilities::detect_host(),
                 jobs: 1,
@@ -514,17 +623,17 @@ fn dispatch_command<W: Write>(
             output,
             json_output,
             jobs,
+            filter,
         } => {
-            let manifests = load_bundles(&bundles)?;
             let cfg = RunnerConfig {
-                backend: CompilerBackend::InProcessScaffold,
+                backend: CompilerBackend::InProcessCompiler,
                 sandbox_root: sandbox_root.to_path_buf(),
-                preserve_on_failure: false,
+                sandbox_retention: SandboxRetention::CleanAlways,
                 c_compiler: PathBuf::from("clang"),
                 capabilities: HostCapabilities::detect_host(),
                 jobs,
             };
-            let records = execute_suite_parallel(&manifests, &cfg)?;
+            let records = execute_bundles_streaming(&bundles, &filter, &cfg)?;
             let md = render_summary_markdown(&records);
             if let Some(path) = output {
                 std::fs::write(path, &md)?;
@@ -536,7 +645,7 @@ fn dispatch_command<W: Write>(
             Ok(())
         }
         RunnerCommand::EmitLit { bundle, out_dir } => {
-            let manifests = load_bundles(core::slice::from_ref(&bundle))?;
+            let manifests = load_single_bundle(&bundle)?;
             let count = emit_lit_wrappers(&manifests, &bundle, &out_dir)?;
             let _ = write!(stdout, "Emitted {count} llvm-lit test wrapper(s).{LF}");
             Ok(())

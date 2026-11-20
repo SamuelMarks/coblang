@@ -6,13 +6,39 @@ use std::process::{Command, Stdio};
 
 use coblang_common::Capability;
 
+/// Policy controlling whether unknown `iconv` codepages may probe the host `iconv` CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IconvProbePolicy {
+    /// Satisfy capabilities strictly from the explicit set without spawning `iconv`.
+    ExplicitOnly,
+    /// Dynamically probe unknown `IconvCodepage` entries via the system `iconv` binary.
+    ProbeSystemIconv,
+}
+
+/// Target byte-order classification for capability registration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetEndianness {
+    /// Little-endian target architecture.
+    LittleEndian,
+    /// Big-endian target architecture.
+    BigEndian,
+}
+
+/// Compile-time endianness of the current host target.
+#[cfg(target_endian = "big")]
+const HOST_ENDIANNESS: TargetEndianness = TargetEndianness::BigEndian;
+
+/// Compile-time endianness of the current host target.
+#[cfg(target_endian = "little")]
+const HOST_ENDIANNESS: TargetEndianness = TargetEndianness::LittleEndian;
+
 /// Snapshot of host/target capabilities used to evaluate `required_capabilities` on tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostCapabilities {
     /// Explicitly enabled discrete capabilities.
     enabled: BTreeSet<Capability>,
-    /// Whether unknown `iconv` codepages should be probed dynamically via the system `iconv` CLI.
-    probe_system_iconv: bool,
+    /// Policy governing dynamic `iconv` codepage probing.
+    iconv_policy: IconvProbePolicy,
 }
 
 impl HostCapabilities {
@@ -24,24 +50,28 @@ impl HostCapabilities {
         enabled.insert(Capability::CCompiler);
         enabled.insert(Capability::PosixTools);
         enabled.insert(Capability::Int128);
-        insert_endian_capability(&mut enabled, cfg!(target_endian = "big"));
+        enabled.insert(Capability::CursesPty);
+        enabled.insert(Capability::Isam);
+        enabled.insert(Capability::Xml);
+        enabled.insert(Capability::Json);
+        insert_endian_capability(&mut enabled, HOST_ENDIANNESS);
         Self {
             enabled,
-            probe_system_iconv: true,
+            iconv_policy: IconvProbePolicy::ProbeSystemIconv,
         }
     }
 
-    /// Constructs a deterministic capability set from an explicit slice without OS probing.
+    /// Constructs a deterministic capability set from an explicit slice without OS probing unless requested.
     ///
     /// # Arguments
     ///
     /// * `caps` - Slice of capabilities to mark available.
-    /// * `probe_system_iconv` - Whether `IconvCodepage` may fall back to invoking `iconv`.
+    /// * `iconv_policy` - Policy governing whether `IconvCodepage` may invoke `iconv`.
     #[must_use]
-    pub fn from_explicit(caps: &[Capability], probe_system_iconv: bool) -> Self {
+    pub fn from_explicit(caps: &[Capability], iconv_policy: IconvProbePolicy) -> Self {
         Self {
             enabled: caps.iter().cloned().collect(),
-            probe_system_iconv,
+            iconv_policy,
         }
     }
 
@@ -56,7 +86,7 @@ impl HostCapabilities {
             return true;
         }
         if let Capability::IconvCodepage(codepage) = cap
-            && self.probe_system_iconv
+            && self.iconv_policy == IconvProbePolicy::ProbeSystemIconv
         {
             return probe_iconv_with_binary(Path::new("iconv"), codepage);
         }
@@ -79,12 +109,15 @@ impl HostCapabilities {
 /// # Arguments
 ///
 /// * `enabled` - Mutable capability set.
-/// * `is_big_endian` - `true` for big-endian targets, `false` for little-endian targets.
-pub fn insert_endian_capability(enabled: &mut BTreeSet<Capability>, is_big_endian: bool) {
-    if is_big_endian {
-        enabled.insert(Capability::BigEndian);
-    } else {
-        enabled.insert(Capability::LittleEndian);
+/// * `endianness` - Target byte-order classification.
+pub fn insert_endian_capability(enabled: &mut BTreeSet<Capability>, endianness: TargetEndianness) {
+    match endianness {
+        TargetEndianness::BigEndian => {
+            enabled.insert(Capability::BigEndian);
+        }
+        TargetEndianness::LittleEndian => {
+            enabled.insert(Capability::LittleEndian);
+        }
     }
 }
 

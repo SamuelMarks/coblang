@@ -1,0 +1,13 @@
+[package]
+name = "coblang-decimal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Pure-Rust exact 38/76-digit fixed-point decimal arithmetic, ISO 2023 rounding modes, and COBOL storage codecs."
+
+[lints]
+workspace = true
+
+[dependencies]
+coblang-common.workspace = true

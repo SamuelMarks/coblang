@@ -1,0 +1,13 @@
+[package]
+name = "coblang-xml-json"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Pure-Rust streaming XML PARSE / XML GENERATE and JSON PARSE / JSON GENERATE engines for COBOL."
+
+[lints]
+workspace = true
+
+[dependencies]
+coblang-common.workspace = true

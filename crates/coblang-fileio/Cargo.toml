@@ -1,0 +1,13 @@
+[package]
+name = "coblang-fileio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Pure-Rust COBOL SEQUENTIAL, LINE SEQUENTIAL, and RELATIVE file I/O engines, ASSIGN TO resolver, LINAGE pagination, and FILE STATUS state machine."
+
+[dependencies]
+coblang-common.workspace = true
+
+[lints]
+workspace = true

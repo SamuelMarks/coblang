@@ -252,7 +252,10 @@ pub fn link_cross_suite_equivalents(manifests: &mut [TestManifest]) {
             peers.sort();
             peers.dedup();
             if !peers.is_empty() {
-                manifests[idx].equivalent_tests = peers;
+                manifests
+                    .get_mut(idx)
+                    .into_iter()
+                    .for_each(|m| m.equivalent_tests = std::mem::take(&mut peers));
             }
         }
     }

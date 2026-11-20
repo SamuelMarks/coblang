@@ -2,7 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-use coblang_common::{Capability, DiagnosticSeverity, Result, TestOutcome, encode_manifest_bundle};
+use coblang_common::{
+    Capability, CoblangError, DiagnosticSeverity, Result, TestOutcome, encode_manifest_bundle,
+};
 use coblang_test_importer::gnucobol::{
     decode_quadrigraphs, extract_cobc_expected_diagnostics, import_autotest_file,
     import_gnucobol_tree, parse_m4_calls, shell_like_split,
@@ -10,7 +12,7 @@ use coblang_test_importer::gnucobol::{
 use coblang_test_runner::capabilities::HostCapabilities;
 use coblang_test_runner::cli::resolve_oracle_backend;
 use coblang_test_runner::engine::{
-    CompilerBackend, RunnerConfig, execute_single_test, execute_suite_parallel,
+    CompilerBackend, RunnerConfig, SandboxRetention, execute_single_test, execute_suite_parallel,
 };
 
 /// Tests quadrigraph decoding, M4 lexer/macro expansion, and M4 error branches.
@@ -38,7 +40,7 @@ MY_CHECK([$COMPILE_ONLY (unbracketed)], 0, [ok])
 AT_CLEANUP";
     let calls = parse_m4_calls(sample, "sample.at")?;
     assert_eq!(calls.len(), 3);
-    assert_eq!(calls[1].name, "AT_CHECK");
+    assert_eq!(calls.get(1).map(|c| c.name.as_str()), Some("AT_CHECK"));
 
     assert_eq!(
         parse_m4_calls("# comment at eof without newline", "ok.at")?,
@@ -65,12 +67,17 @@ cobc: error: no line
 plain
 ";
     let diags = extract_cobc_expected_diagnostics(diag_text);
-    assert_eq!(diags.len(), 4);
-    assert_eq!(diags[0].severity, DiagnosticSeverity::Error);
-    assert_eq!(diags[0].line, Some(9));
-    assert_eq!(diags[1].severity, DiagnosticSeverity::Warning);
-    assert_eq!(diags[2].line, None);
-    assert_eq!(diags[3].line, None);
+    let summary: Vec<(DiagnosticSeverity, Option<u32>)> =
+        diags.iter().map(|d| (d.severity, d.line)).collect();
+    assert_eq!(
+        summary,
+        vec![
+            (DiagnosticSeverity::Error, Some(9)),
+            (DiagnosticSeverity::Warning, Some(11)),
+            (DiagnosticSeverity::Error, None),
+            (DiagnosticSeverity::Error, None),
+        ]
+    );
     Ok(())
 }
 
@@ -97,17 +104,12 @@ fn synthetic_autotest_edge_cases() -> Result<()> {
     std::fs::write(&rich_path, sample_rich_autotest_script())?;
     let imported = import_autotest_file(&rich_path, "rich", "rich.at", "")?;
     assert_eq!(imported.len(), 2);
-    assert!(imported[0].id.ends_with("_case"));
-    assert!(
-        imported[0]
-            .required_capabilities
-            .contains(&Capability::BigEndian)
-    );
-    assert!(
-        imported[0]
-            .required_capabilities
-            .contains(&Capability::CCompiler)
-    );
+    let first = imported.first().ok_or_else(|| CoblangError::InvalidCli {
+        message: String::from("missing first imported manifest"),
+    })?;
+    assert!(first.id.ends_with("_case"));
+    assert!(first.required_capabilities.contains(&Capability::BigEndian));
+    assert!(first.required_capabilities.contains(&Capability::CCompiler));
 
     let mini_gnu = tmp.join("mini_tests");
     std::fs::create_dir_all(mini_gnu.join("testsuite.src"))?;
@@ -152,6 +154,8 @@ AT_DATA([prog.cob], [
 AT_CHECK([])
 AT_CHECK([# comment only])
 AT_CHECK([export ONLY_ENV=1])
+AT_CHECK([export ONLY_ENV=2])
+AT_CHECK([ONLY_ENV=3 ./prog], [0], [], [])
 AT_CHECK([=empty_key])
 AT_CHECK([BAD-KEY=1])
 AT_CHECK([$CC -Wall -shared -o helper.so helper.c helper.o], [0], [], [])
@@ -164,8 +168,15 @@ AT_CHECK([$COBC -std bad prog.cob;], [1], [], [])
 AT_CHECK([$COBC -x -free -fixed -I inc -Iinc2 -ext .cpy -std cobol85 -std=ibm -std=bad -Wall --tlines=0 --unknown-extra -o ./prog prog.cob < inp.txt], [0], [expout], [experr])
 AT_CHECK([./prog arg1 < inp.txt], [0], [expout], [ignore])
 AT_CHECK([./prog <], [0], [], [])
+AT_CHECK([DD_IN=inp.txt \
+$COBCRUN_DIRECT ./prog], [0], [], [])
+AT_CHECK([$RUN_PROG_MANUAL $COBCRUN ./prog], [0], [], [])
+AT_CHECK([TRAILING_CONT=1 \], [0], [], [])
 AT_CHECK([cat])
 AT_CHECK([cat ./out.txt], [0], [DONE])
+AT_DATA([ref_step], [STEP_REF])
+AT_CHECK([$DIFF ref_step ./out.txt], [0])
+AT_CHECK([$DIFF expout ./out2.txt], [0])
 AT_DATA([prog.cob], [OVERWRITTEN])
 AT_CLEANUP
 
@@ -198,7 +209,7 @@ fn import_full_gnucobol_suite_and_verify_oracle() -> Result<()> {
     let cfg = RunnerConfig {
         backend: CompilerBackend::InProcessScaffold,
         sandbox_root: std::env::temp_dir().join("coblang-gnu-dryrun"),
-        preserve_on_failure: false,
+        sandbox_retention: SandboxRetention::CleanAlways,
         c_compiler: PathBuf::from("clang"),
         capabilities: HostCapabilities::detect_host(),
         jobs: 8,
@@ -218,13 +229,25 @@ fn import_full_gnucobol_suite_and_verify_oracle() -> Result<()> {
     let oracle_cfg = RunnerConfig {
         backend: resolve_oracle_backend(Some("cobc"))?,
         sandbox_root: std::env::temp_dir().join("coblang-gnu-oracle"),
-        preserve_on_failure: false,
+        sandbox_retention: SandboxRetention::CleanAlways,
         c_compiler: PathBuf::from("clang"),
         capabilities: HostCapabilities::detect_host(),
         jobs: 1,
     };
-    let syn_move_first = &imported.by_file["syn_move"][0];
-    let run_fund_first = &imported.by_file["run_fundamental"][0];
+    let syn_move_first = imported
+        .by_file
+        .get("syn_move")
+        .and_then(|v| v.first())
+        .ok_or_else(|| CoblangError::InvalidCli {
+            message: String::from("missing syn_move[0]"),
+        })?;
+    let run_fund_first = imported
+        .by_file
+        .get("run_fundamental")
+        .and_then(|v| v.first())
+        .ok_or_else(|| CoblangError::InvalidCli {
+            message: String::from("missing run_fundamental[0]"),
+        })?;
     assert_eq!(
         execute_single_test(syn_move_first, &oracle_cfg, 0)?.outcome,
         TestOutcome::Pass
@@ -233,5 +256,25 @@ fn import_full_gnucobol_suite_and_verify_oracle() -> Result<()> {
         execute_single_test(run_fund_first, &oracle_cfg, 1)?.outcome,
         TestOutcome::Pass
     );
+    let rw_0026 = imported
+        .by_file
+        .get("run_reportwriter")
+        .and_then(|v| {
+            v.iter()
+                .find(|m| m.id.ends_with("0026_report_present_after"))
+        })
+        .ok_or_else(|| CoblangError::InvalidCli {
+            message: String::from("missing run_reportwriter/0026"),
+        })?;
+    assert_eq!(
+        execute_single_test(rw_0026, &oracle_cfg, 2)?.outcome,
+        TestOutcome::Pass
+    );
+    let regen_dir = std::env::temp_dir().join("coblang-ported-m18-m19");
+    let _ = std::fs::remove_dir_all(&regen_dir);
+    let _ = coblang_test_importer::import_and_write_all_ported_suites(
+        &root.join(".upstream-cache"),
+        &regen_dir,
+    )?;
     Ok(())
 }

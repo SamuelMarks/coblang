@@ -9,6 +9,11 @@ use coblang_common::{
     TextEncoding,
 };
 
+/// Real incremental compiler pipeline runner (`-E` preprocessor, `-t`/`-T` listings, `-conf=`).
+pub mod pipeline;
+pub use coblang_dynload::open_raw_pty_pair;
+pub use pipeline::{execute_cobcrun_driver, execute_compiler_driver};
+
 /// Deterministic exit status (`78`) emitted when compilation or module loading is unimplemented.
 pub const EXIT_UNIMPLEMENTED: u8 = 78;
 
@@ -124,8 +129,7 @@ pub fn parse_driver_args(flavor: DriverFlavor, args: &[String]) -> Result<Parsed
     };
 
     let mut idx = 0;
-    while idx < args.len() {
-        let arg = args[idx].as_str();
+    while let Some(arg) = args.get(idx).map(String::as_str) {
         if matches!(arg, "--version" | "-V") {
             inv.query = Some(DriverQuery::Version);
             return Ok(inv);
@@ -134,7 +138,7 @@ pub fn parse_driver_args(flavor: DriverFlavor, args: &[String]) -> Result<Parsed
             inv.query = Some(DriverQuery::Help);
             return Ok(inv);
         }
-        idx = apply_driver_token(&mut inv, args, idx)?;
+        idx = apply_driver_token(&mut inv, arg, args, idx)?;
         idx += 1;
     }
 
@@ -152,6 +156,7 @@ pub fn parse_driver_args(flavor: DriverFlavor, args: &[String]) -> Result<Parsed
 /// # Arguments
 ///
 /// * `inv` - Mutable invocation accumulator.
+/// * `arg` - Current CLI token at `idx`.
 /// * `args` - Full CLI argument slice.
 /// * `idx` - Current index in `args`.
 ///
@@ -160,10 +165,10 @@ pub fn parse_driver_args(flavor: DriverFlavor, args: &[String]) -> Result<Parsed
 /// Returns [`CoblangError::InvalidCli`] if a required value is missing or invalid.
 fn apply_driver_token(
     inv: &mut ParsedDriverInvocation,
+    arg: &str,
     args: &[String],
     mut idx: usize,
 ) -> Result<usize> {
-    let arg = args[idx].as_str();
     match arg {
         "-E" => inv.mode = CompilationMode::PreprocessOnly,
         "-fsyntax-only" => inv.mode = CompilationMode::SyntaxOnly,
@@ -251,6 +256,9 @@ fn parse_attached_or_positional(inv: &mut ParsedDriverInvocation, arg: &str) -> 
             OptimizationLevel::parse_flag(arg, 0).map_err(|_| CoblangError::InvalidCli {
                 message: format!("unsupported optimization flag `{arg}`"),
             })?;
+    } else if matches!(arg, "--emit-mlir" | "--emit-mlir-llvm") {
+        inv.mode = CompilationMode::EmitLlvmIr;
+        inv.extra_flags.push(String::from(arg));
     } else if arg.starts_with("-W")
         || arg.starts_with("-f")
         || arg.starts_with("-D")
@@ -260,6 +268,7 @@ fn parse_attached_or_positional(inv: &mut ParsedDriverInvocation, arg: &str) -> 
             "-w" | "-v" | "-q" | "-save-temps" | "-static" | "-rdynamic" | "-main"
         )
         || arg.starts_with("-conf=")
+        || arg.starts_with("-cb_conf=")
         || arg.starts_with("--tlines=")
     {
         if arg.starts_with("-fec=") {
@@ -318,8 +327,7 @@ pub fn parse_cobcrun_args(
     }
 
     let mut idx = 0;
-    while idx < args.len() {
-        let arg = args[idx].as_str();
+    while let Some(arg) = args.get(idx).map(String::as_str) {
         match arg {
             "--version" | "-V" => {
                 return Ok(ParsedCobcrunInvocation {
@@ -350,7 +358,7 @@ pub fn parse_cobcrun_args(
                     });
                 } else {
                     let module_name = String::from(arg);
-                    let program_args = args[idx + 1..].to_vec();
+                    let program_args = args.get(idx + 1..).unwrap_or(&[]).to_vec();
                     return Ok(ParsedCobcrunInvocation {
                         query: None,
                         module_dirs,
@@ -514,13 +522,20 @@ pub const fn flavor_label(flavor: DriverFlavor) -> &'static str {
 /// Process [`ExitCode`] corresponding to the driver's numeric return code.
 pub fn main_entry(flavor: DriverFlavor) -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let env_vars: Vec<(String, String)> = std::env::vars().collect();
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();
     let code = if flavor == DriverFlavor::Cobcrun {
-        let lib_path = std::env::var("COB_LIBRARY_PATH").ok();
-        execute_cobcrun(&args, lib_path.as_deref(), &mut stdout, &mut stderr)
+        execute_cobcrun_driver(&args, &env_vars, Path::new("."), &mut stdout, &mut stderr)
     } else {
-        execute_driver(flavor, &args, Path::new("."), &mut stdout, &mut stderr)
+        execute_compiler_driver(
+            flavor,
+            &args,
+            &env_vars,
+            Path::new("."),
+            &mut stdout,
+            &mut stderr,
+        )
     };
     ExitCode::from(code)
 }

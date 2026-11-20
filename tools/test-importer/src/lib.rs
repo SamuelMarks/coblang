@@ -91,7 +91,7 @@ pub fn import_and_write_all_ported_suites(
     let mut offset = 0;
     for ((rel_bundle, _), len) in buckets.iter().zip(lengths) {
         let dest = ported_root.join(rel_bundle);
-        let slice = &flat[offset..offset + len];
+        let slice = flat.get(offset..offset + len).unwrap_or(&[]);
         std::fs::write(dest, encode_manifest_bundle(slice))?;
         offset += len;
     }

@@ -108,15 +108,15 @@ impl OutputMatcher {
             "norm" => Ok(Self::NormalizedLines(hex_decode_utf8(payload, line)?)),
             "ccvs85" => {
                 let nums: Vec<&str> = payload.split(',').collect();
-                if nums.len() != 3 {
-                    return Err(CoblangError::ManifestFormat {
+                let &[n0, n1, n2] = <&[&str; 3]>::try_from(nums.as_slice()).map_err(|_| {
+                    CoblangError::ManifestFormat {
                         line,
                         message: format!("invalid ccvs85 payload `{payload}`"),
-                    });
-                }
-                let expected_pass = parse_u32(nums[0], line)?;
-                let expected_deleted = parse_u32(nums[1], line)?;
-                let expected_inspect = parse_u32(nums[2], line)?;
+                    }
+                })?;
+                let expected_pass = parse_u32(n0, line)?;
+                let expected_deleted = parse_u32(n1, line)?;
+                let expected_inspect = parse_u32(n2, line)?;
                 Ok(Self::Ccvs85Report {
                     expected_pass,
                     expected_deleted,
@@ -445,7 +445,7 @@ pub fn decode_manifest_bundle(input: &str) -> Result<Vec<TestManifest>> {
             continue;
         }
         let cols: Vec<&str> = raw_line.split(TAB).collect();
-        let tag = cols[0];
+        let tag = cols.first().copied().unwrap_or("");
         if tag == "TEST" {
             if current.is_some() {
                 return Err(CoblangError::ManifestFormat {
@@ -453,9 +453,9 @@ pub fn decode_manifest_bundle(input: &str) -> Result<Vec<TestManifest>> {
                     message: String::from("nested TEST without END_TEST"),
                 });
             }
-            require_cols(&cols, 2, line_no)?;
+            let [_, id_col] = require_cols::<2>(&cols, line_no)?;
             current = Some(TestManifest {
-                id: hex_decode_utf8(cols[1], line_no)?,
+                id: hex_decode_utf8(id_col, line_no)?,
                 suite: SuiteId::Canary,
                 provenance: Provenance {
                     upstream_repo: String::new(),
@@ -520,60 +520,60 @@ pub fn decode_manifest_bundle(input: &str) -> Result<Vec<TestManifest>> {
 ///
 /// Returns [`CoblangError::ManifestFormat`] if column counts or field encodings are invalid.
 fn decode_record(m: &mut TestManifest, cols: &[&str], line: usize) -> Result<()> {
-    match cols[0] {
+    match cols.first().copied().unwrap_or("") {
         "SUITE" => {
-            require_cols(cols, 2, line)?;
-            m.suite = SuiteId::parse_token(cols[1], line)?;
+            let [_, c1] = require_cols::<2>(cols, line)?;
+            m.suite = SuiteId::parse_token(c1, line)?;
         }
         "PROV" => {
-            require_cols(cols, 7, line)?;
+            let [_, c1, c2, c3, c4, c5, c6] = require_cols::<7>(cols, line)?;
             m.provenance = Provenance {
-                upstream_repo: hex_decode_utf8(cols[1], line)?,
-                upstream_commit: hex_decode_utf8(cols[2], line)?,
-                source_file: hex_decode_utf8(cols[3], line)?,
-                source_line: parse_u32(cols[4], line)?,
-                original_test_name: hex_decode_utf8(cols[5], line)?,
-                spdx_license: hex_decode_utf8(cols[6], line)?,
+                upstream_repo: hex_decode_utf8(c1, line)?,
+                upstream_commit: hex_decode_utf8(c2, line)?,
+                source_file: hex_decode_utf8(c3, line)?,
+                source_line: parse_u32(c4, line)?,
+                original_test_name: hex_decode_utf8(c5, line)?,
+                spdx_license: hex_decode_utf8(c6, line)?,
             };
         }
         "TORTURE" => {
-            require_cols(cols, 2, line)?;
-            m.torture_optimizations = cols[1]
+            let [_, c1] = require_cols::<2>(cols, line)?;
+            m.torture_optimizations = c1
                 .split(',')
                 .map(|t| OptimizationLevel::parse_flag(t, line))
                 .collect::<Result<Vec<_>>>()?;
         }
         "CAPS" => {
-            require_cols(cols, 2, line)?;
-            m.required_capabilities = cols[1]
+            let [_, c1] = require_cols::<2>(cols, line)?;
+            m.required_capabilities = c1
                 .split(',')
                 .map(|t| Capability::parse_token(t, line))
                 .collect::<Result<Vec<_>>>()?;
         }
         "XFAIL" => {
-            require_cols(cols, 2, line)?;
-            m.xfail_reason = Some(hex_decode_utf8(cols[1], line)?);
+            let [_, c1] = require_cols::<2>(cols, line)?;
+            m.xfail_reason = Some(hex_decode_utf8(c1, line)?);
         }
         "SKIP" => {
-            require_cols(cols, 2, line)?;
-            m.skip_reason = Some(hex_decode_utf8(cols[1], line)?);
+            let [_, c1] = require_cols::<2>(cols, line)?;
+            m.skip_reason = Some(hex_decode_utf8(c1, line)?);
         }
         "TAGS" => {
-            require_cols(cols, 2, line)?;
-            m.feature_tags = cols[1]
+            let [_, c1] = require_cols::<2>(cols, line)?;
+            m.feature_tags = c1
                 .split(',')
                 .map(|t| FeatureTag::parse_token(t, line))
                 .collect::<Result<Vec<_>>>()?;
         }
         "EQUIV" => {
-            require_cols(cols, 2, line)?;
-            m.equivalent_tests = decode_str_list(cols[1], line)?;
+            let [_, c1] = require_cols::<2>(cols, line)?;
+            m.equivalent_tests = decode_str_list(c1, line)?;
         }
         "FILE" => {
-            require_cols(cols, 3, line)?;
+            let [_, c1, c2] = require_cols::<3>(cols, line)?;
             m.files.push(WorkspaceFile {
-                relative_path: hex_decode_utf8(cols[1], line)?,
-                contents: hex_decode(cols[2], line)?,
+                relative_path: hex_decode_utf8(c1, line)?,
+                contents: hex_decode(c2, line)?,
             });
         }
         _ => decode_step_record(&mut m.steps, cols, line)?,
@@ -593,66 +593,66 @@ fn decode_record(m: &mut TestManifest, cols: &[&str], line: usize) -> Result<()>
 ///
 /// Returns [`CoblangError::ManifestFormat`] if the step tag or fields are malformed.
 fn decode_step_record(steps: &mut Vec<TestStep>, cols: &[&str], line: usize) -> Result<()> {
-    match cols[0] {
+    match cols.first().copied().unwrap_or("") {
         "STEP_WRITE" => {
-            require_cols(cols, 3, line)?;
+            let [_, c1, c2] = require_cols::<3>(cols, line)?;
             steps.push(TestStep::WriteFile(WorkspaceFile {
-                relative_path: hex_decode_utf8(cols[1], line)?,
-                contents: hex_decode(cols[2], line)?,
+                relative_path: hex_decode_utf8(c1, line)?,
+                contents: hex_decode(c2, line)?,
             }));
         }
         "STEP_CC" => {
-            require_cols(cols, 4, line)?;
+            let [_, c1, c2, c3] = require_cols::<4>(cols, line)?;
             steps.push(TestStep::CompileC(CompileCSpec {
-                sources: decode_str_list(cols[1], line)?,
-                shared: parse_bool01(cols[2], line)?,
-                output: hex_decode_utf8(cols[3], line)?,
+                sources: decode_str_list(c1, line)?,
+                shared: parse_bool01(c2, line)?,
+                output: hex_decode_utf8(c3, line)?,
             }));
         }
         "STEP_COBOL" => {
             steps.push(TestStep::CompileCobol(decode_cobol_step(cols, line)?));
         }
         "STEP_COBOL_ENV" => {
-            require_cols(cols, 2, line)?;
+            let [_, c1] = require_cols::<2>(cols, line)?;
             let Some(TestStep::CompileCobol(cb)) = steps.last_mut() else {
                 return Err(CoblangError::ManifestFormat {
                     line,
                     message: String::from("STEP_COBOL_ENV without preceding STEP_COBOL"),
                 });
             };
-            cb.env = decode_kv_list(cols[1], line)?;
+            cb.env = decode_kv_list(c1, line)?;
         }
         "STEP_RUN" => {
-            require_cols(cols, 12, line)?;
-            let exit_code = cols[6]
+            let [_, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11] = require_cols::<12>(cols, line)?;
+            let exit_code = c6
                 .parse::<i32>()
                 .map_err(|_| CoblangError::ManifestFormat {
                     line,
-                    message: format!("invalid exit code `{}`", cols[6]),
+                    message: format!("invalid exit code `{c6}`"),
                 })?;
-            let timeout_ms = cols[11]
+            let timeout_ms = c11
                 .parse::<u64>()
                 .map_err(|_| CoblangError::ManifestFormat {
                     line,
-                    message: format!("invalid timeout `{}`", cols[11]),
+                    message: format!("invalid timeout `{c11}`"),
                 })?;
             steps.push(TestStep::RunBinary(RunBinarySpec {
-                target: hex_decode_utf8(cols[1], line)?,
-                via_cobcrun: parse_bool01(cols[2], line)?,
-                args: decode_str_list(cols[3], line)?,
-                stdin: hex_decode(cols[4], line)?,
-                env: decode_kv_list(cols[5], line)?,
+                target: hex_decode_utf8(c1, line)?,
+                via_cobcrun: parse_bool01(c2, line)?,
+                args: decode_str_list(c3, line)?,
+                stdin: hex_decode(c4, line)?,
+                env: decode_kv_list(c5, line)?,
                 expected_exit_code: exit_code,
-                stdout: OutputMatcher::from_parts(cols[7], cols[8], line)?,
-                stderr: OutputMatcher::from_parts(cols[9], cols[10], line)?,
+                stdout: OutputMatcher::from_parts(c7, c8, line)?,
+                stderr: OutputMatcher::from_parts(c9, c10, line)?,
                 expected_files: Vec::new(),
                 timeout_ms,
             }));
         }
         "STEP_RUN_FILE" => {
-            require_cols(cols, 4, line)?;
-            let path = hex_decode_utf8(cols[1], line)?;
-            let matcher = OutputMatcher::from_parts(cols[2], cols[3], line)?;
+            let [_, c1, c2, c3] = require_cols::<4>(cols, line)?;
+            let path = hex_decode_utf8(c1, line)?;
+            let matcher = OutputMatcher::from_parts(c2, c3, line)?;
             let Some(TestStep::RunBinary(rb)) = steps.last_mut() else {
                 return Err(CoblangError::ManifestFormat {
                     line,
@@ -682,57 +682,71 @@ fn decode_step_record(steps: &mut Vec<TestStep>, cols: &[&str], line: usize) -> 
 ///
 /// Returns [`CoblangError::ManifestFormat`] if column count or any field is malformed.
 fn decode_cobol_step(cols: &[&str], line: usize) -> Result<CompileCobolSpec> {
-    require_cols(cols, 18, line)?;
-    let dialect = Dialect::from_cli_name(cols[3]).map_err(|_| CoblangError::ManifestFormat {
+    let [
+        _,
+        c1,
+        c2,
+        c3,
+        c4,
+        c5,
+        c6,
+        c7,
+        c8,
+        c9,
+        c10,
+        c11,
+        c12,
+        c13,
+        c14,
+        c15,
+        c16,
+        c17,
+    ] = require_cols::<18>(cols, line)?;
+    let dialect = Dialect::from_cli_name(c3).map_err(|_| CoblangError::ManifestFormat {
         line,
-        message: format!("invalid dialect `{}`", cols[3]),
+        message: format!("invalid dialect `{c3}`"),
     })?;
-    let enc_tok = hex_decode_utf8(cols[5], line)?;
+    let enc_tok = hex_decode_utf8(c5, line)?;
     Ok(CompileCobolSpec {
-        mode: CompilationMode::parse_token(cols[1], line)?,
-        format: SourceFormat::parse_token(cols[2], line)?,
+        mode: CompilationMode::parse_token(c1, line)?,
+        format: SourceFormat::parse_token(c2, line)?,
         dialect,
-        optimization: OptimizationLevel::parse_flag(cols[4], line)?,
+        optimization: OptimizationLevel::parse_flag(c4, line)?,
         encoding: TextEncoding::parse_token(&enc_tok, line)?,
-        sources: decode_str_list(cols[6], line)?,
-        include_dirs: decode_str_list(cols[7], line)?,
-        copy_exts: decode_str_list(cols[8], line)?,
-        library_dirs: decode_str_list(cols[9], line)?,
-        libraries: decode_str_list(cols[10], line)?,
-        raw_flags: decode_str_list(cols[11], line)?,
-        output: hex_decode_utf8(cols[12], line)?,
-        expected_success: parse_bool01(cols[13], line)?,
-        expected_diagnostics: decode_diagnostics(cols[14], line)?,
-        bogus_patterns: decode_str_list(cols[15], line)?,
-        allow_excess_errors: parse_bool01(cols[16], line)?,
-        prune_patterns: decode_str_list(cols[17], line)?,
+        sources: decode_str_list(c6, line)?,
+        include_dirs: decode_str_list(c7, line)?,
+        copy_exts: decode_str_list(c8, line)?,
+        library_dirs: decode_str_list(c9, line)?,
+        libraries: decode_str_list(c10, line)?,
+        raw_flags: decode_str_list(c11, line)?,
+        output: hex_decode_utf8(c12, line)?,
+        expected_success: parse_bool01(c13, line)?,
+        expected_diagnostics: decode_diagnostics(c14, line)?,
+        bogus_patterns: decode_str_list(c15, line)?,
+        allow_excess_errors: parse_bool01(c16, line)?,
+        prune_patterns: decode_str_list(c17, line)?,
         env: Vec::new(),
     })
 }
 
-/// Validates that `cols` has exact length `expected`.
+/// Validates that `cols` has exact length `N` and returns it as a fixed-size array.
 ///
 /// # Arguments
 ///
 /// * `cols` - Parsed tab-separated columns.
-/// * `expected` - Expected column count.
 /// * `line` - Manifest line number used for error reporting.
 ///
 /// # Errors
 ///
-/// Returns [`CoblangError::ManifestFormat`] when `cols.len() != expected`.
-fn require_cols(cols: &[&str], expected: usize, line: usize) -> Result<()> {
-    if cols.len() != expected {
-        return Err(CoblangError::ManifestFormat {
+/// Returns [`CoblangError::ManifestFormat`] when `cols.len() != N`.
+fn require_cols<'a, const N: usize>(cols: &[&'a str], line: usize) -> Result<[&'a str; N]> {
+    <&[&'a str; N]>::try_from(cols).copied().map_err(|_| {
+        let tag = cols.first().copied().unwrap_or("");
+        CoblangError::ManifestFormat {
             line,
-            message: format!(
-                "record `{}` expected {expected} columns, got {}",
-                cols[0],
-                cols.len()
-            ),
-        });
-    }
-    Ok(())
+            message: format!("record `{tag}` expected {N} columns, got {}", cols.len()),
+        }
+    })
 }
 
 /// Parses an unsigned 32-bit integer field.
@@ -894,18 +908,17 @@ fn decode_diagnostics(raw: &str, line: usize) -> Result<Vec<ExpectedDiagnostic>>
     let mut out = Vec::new();
     for entry in raw.split(',') {
         let parts: Vec<&str> = entry.split(':').collect();
-        if parts.len() != 4 {
-            return Err(CoblangError::ManifestFormat {
+        let &[p0, p1, p2, p3] =
+            <&[&str; 4]>::try_from(parts.as_slice()).map_err(|_| CoblangError::ManifestFormat {
                 line,
                 message: format!("invalid diagnostic entry `{entry}`"),
-            });
-        }
-        let ln = parse_u32(parts[1], line)?;
+            })?;
+        let ln = parse_u32(p1, line)?;
         out.push(ExpectedDiagnostic {
-            file: hex_decode_utf8(parts[0], line)?,
+            file: hex_decode_utf8(p0, line)?,
             line: if ln == 0 { None } else { Some(ln) },
-            severity: DiagnosticSeverity::parse_token(parts[2], line)?,
-            message_pattern: hex_decode_utf8(parts[3], line)?,
+            severity: DiagnosticSeverity::parse_token(p2, line)?,
+            message_pattern: hex_decode_utf8(p3, line)?,
         });
     }
     Ok(out)
@@ -942,20 +955,18 @@ pub fn hex_decode(hex: &str, line: usize) -> Result<Vec<u8>> {
     if hex == "." {
         return Ok(Vec::new());
     }
-    if !hex.len().is_multiple_of(2) {
+    let (pairs, rem) = hex.as_bytes().as_chunks::<2>();
+    if !rem.is_empty() {
         return Err(CoblangError::ManifestFormat {
             line,
             message: format!("odd-length hex token `{hex}`"),
         });
     }
-    let mut out = Vec::with_capacity(hex.len() / 2);
-    let raw = hex.as_bytes();
-    let mut idx = 0;
-    while idx < raw.len() {
-        let hi = decode_nibble(raw[idx], line)?;
-        let lo = decode_nibble(raw[idx + 1], line)?;
+    let mut out = Vec::with_capacity(pairs.len());
+    for &[hi_ch, lo_ch] in pairs {
+        let hi = decode_nibble(hi_ch, line)?;
+        let lo = decode_nibble(lo_ch, line)?;
         out.push((hi << 4) | lo);
-        idx += 2;
     }
     Ok(out)
 }

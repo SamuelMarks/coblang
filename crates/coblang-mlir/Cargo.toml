@@ -1,0 +1,26 @@
+[package]
+name = "coblang-mlir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Custom COBOL MLIR 20 dialect builders, verifiers, and LLVM dialect lowering passes."
+
+[dependencies]
+coblang-common.workspace = true
+coblang-decimal.workspace = true
+coblang-diag.workspace = true
+coblang-dynload.workspace = true
+coblang-hir.workspace = true
+coblang-intrinsics.workspace = true
+coblang-pic.workspace = true
+coblang-rt-core.workspace = true
+melior.workspace = true
+
+[dev-dependencies]
+coblang-pp.workspace = true
+coblang-sema.workspace = true
+coblang-syntax.workspace = true
+
+[lints]
+workspace = true

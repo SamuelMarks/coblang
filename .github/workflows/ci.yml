@@ -35,6 +35,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
+      - name: Install LLVM 20 & MLIR 20 development libraries
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+          CODENAME="$(. /etc/os-release && echo "${UBUNTU_CODENAME}")"
+          echo "deb http://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-20 main" | sudo tee /etc/apt/sources.list.d/llvm-20.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends llvm-20-dev libmlir-20-dev mlir-20-tools libpolly-20-dev zlib1g-dev libzstd-dev
+          echo "MLIR_SYS_200_PREFIX=/usr/lib/llvm-20" >> "$GITHUB_ENV"
+          echo "LLVM_SYS_201_PREFIX=/usr/lib/llvm-20" >> "$GITHUB_ENV"
+          echo "TABLEGEN_200_PREFIX=/usr/lib/llvm-20" >> "$GITHUB_ENV"
+
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -46,117 +57,8 @@ jobs:
       - name: Check formatting (rustfmt)
         run: cargo fmt --all -- --check
 
-      - name: Check strict Clippy lints
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      - name: Check Rustdoc (including private items)
-        env:
-          RUSTDOCFLAGS: -D warnings
-        run: cargo doc --workspace --no-deps --document-private-items --locked
-
-      - name: Check file-header & function-argument doc coverage
-        run: |
-          python3 - <<'PY'
-          import pathlib, re, sys
-
-          root = pathlib.Path(".")
-          rs_files = (
-              list(root.glob("src/**/*.rs"))
-              + list(root.glob("tools/**/*.rs"))
-              + list(root.glob("tests/**/*.rs"))
-          )
-          fn_re = re.compile(
-              r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?fn\s+([A-Za-z0-9_]+)\s*(?:<[^>]*>)?\s*\((.*)"
-          )
-          errors = []
-          for path in sorted(rs_files):
-              lines = path.read_text(encoding="utf-8").splitlines()
-              if not lines or not lines[0].startswith("//!"):
-                  errors.append(f"{path}:1: missing `//!` file/module documentation header")
-              is_test_file = path.parts[0] == "tests" or "tests" in path.parts
-              i = 0
-              while i < len(lines):
-                  m = fn_re.match(lines[i])
-                  if m:
-                      fn_name = m.group(1)
-                      sig_lines = [lines[i]]
-                      j = i
-                      while ")" not in lines[j] and j + 1 < len(lines):
-                          j += 1
-                          sig_lines.append(lines[j])
-                      sig = " ".join(sig_lines)
-                      params_part = sig.split("(", 1)[1].rsplit(")", 1)[0].strip()
-                      k = i - 1
-                      doc_lines = []
-                      has_test_attr = False
-                      while k >= 0:
-                          stripped = lines[k].strip()
-                          if stripped.startswith("///"):
-                              doc_lines.append(stripped)
-                          elif stripped.startswith("#["):
-                              if "test" in stripped:
-                                  has_test_attr = True
-                          else:
-                              break
-                          k -= 1
-                      doc_text = chr(10).join(reversed(doc_lines))
-                      if not doc_lines:
-                          errors.append(f"{path}:{i+1}: function `{fn_name}` is missing `///` doc comment")
-                      if not is_test_file and not has_test_attr and params_part:
-                          raw_params, depth, cur = [], 0, []
-                          for ch in params_part:
-                              if ch in "([<":
-                                  depth += 1
-                              elif ch in ")]>":
-                                  depth -= 1
-                              if ch == "," and depth == 0:
-                                  tok = "".join(cur).strip()
-                                  if tok:
-                                      raw_params.append(tok)
-                                  cur = []
-                              else:
-                                  cur.append(ch)
-                          tail = "".join(cur).strip()
-                          if tail:
-                              raw_params.append(tail)
-                          arg_names = []
-                          for rp in raw_params:
-                              if rp in ("self", "&self", "&mut self", "mut self"):
-                                  continue
-                              if ":" in rp:
-                                  lhs = rp.split(":", 1)[0].strip().removeprefix("mut ").strip()
-                                  if lhs and lhs != "_":
-                                      arg_names.append(lhs)
-                          if arg_names:
-                              if "# Arguments" not in doc_text:
-                                  errors.append(
-                                      f"{path}:{i+1}: function `{fn_name}` takes parameters {arg_names} but lacks `# Arguments` section"
-                                  )
-                              for arg in arg_names:
-                                  if f"`{arg}`" not in doc_text:
-                                      errors.append(
-                                          f"{path}:{i+1}: function `{fn_name}` does not document parameter `{arg}`"
-                                      )
-                      i = j + 1
-                  else:
-                      i += 1
-          if errors:
-              for err in errors:
-                  print(err, file=sys.stderr)
-              sys.exit(1)
-          PY
-
-      - name: Check GPLv3 clean-room boundary
-        run: |
-          python3 - <<'PY'
-          import pathlib, re, sys
-
-          forbidden = re.compile(r'include_(?:str|bytes)!\s*\([^)]*ported/')
-          for path in list(pathlib.Path("src").rglob("*.rs")) + list(pathlib.Path("tools").rglob("*.rs")):
-              if forbidden.search(path.read_text(encoding="utf-8")):
-                  print(f"Clean-room violation in {path}: compiler/tooling embeds ported GPLv3 test data", file=sys.stderr)
-                  sys.exit(1)
-          PY
+      - name: Run Clippy, Rustdoc, 5-way Doc Coverage & Clean-Room Lints
+        run: ./scripts/precommit-lint.sh
 
       - name: Verify README.md '% doc coverage' shield
         run: python3 scripts/update-readme-shields.py --metric doc --readme README.md --check
@@ -177,18 +79,30 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Install host oracle & C companion dependencies (Linux)
+      - name: Install host oracle, LLVM 20, MLIR 20 & C companion dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+          CODENAME="$(. /etc/os-release && echo "${UBUNTU_CODENAME}")"
+          echo "deb http://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-20 main" | sudo tee /etc/apt/sources.list.d/llvm-20.list
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang gnucobol
+          sudo apt-get install -y --no-install-recommends clang gnucobol llvm-20-dev libmlir-20-dev mlir-20-tools libpolly-20-dev zlib1g-dev libzstd-dev
+          echo "MLIR_SYS_200_PREFIX=/usr/lib/llvm-20" >> "$GITHUB_ENV"
+          echo "LLVM_SYS_201_PREFIX=/usr/lib/llvm-20" >> "$GITHUB_ENV"
+          echo "TABLEGEN_200_PREFIX=/usr/lib/llvm-20" >> "$GITHUB_ENV"
 
-      - name: Install host oracle dependencies (macOS)
+      - name: Install host oracle & LLVM 20 dependencies (macOS)
         if: runner.os == 'macOS'
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
           HOMEBREW_NO_INSTALL_CLEANUP: "1"
-        run: brew install gnucobol
+        run: |
+          brew install gnucobol llvm@20
+          LLVM20_PREFIX="$(brew --prefix llvm@20)"
+          echo "MLIR_SYS_200_PREFIX=${LLVM20_PREFIX}" >> "$GITHUB_ENV"
+          echo "LLVM_SYS_201_PREFIX=${LLVM20_PREFIX}" >> "$GITHUB_ENV"
+          echo "TABLEGEN_200_PREFIX=${LLVM20_PREFIX}" >> "$GITHUB_ENV"
+          echo "LIBRARY_PATH=$(brew --prefix)/lib" >> "$GITHUB_ENV"
 
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -221,10 +135,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Install host oracle & C companion dependencies
+      - name: Install host oracle, LLVM 20, MLIR 20 & C companion dependencies
         run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+          CODENAME="$(. /etc/os-release && echo "${UBUNTU_CODENAME}")"
+          echo "deb http://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-20 main" | sudo tee /etc/apt/sources.list.d/llvm-20.list
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang gnucobol
+          sudo apt-get install -y --no-install-recommends clang gnucobol llvm-20-dev libmlir-20-dev mlir-20-tools libpolly-20-dev zlib1g-dev libzstd-dev
+          echo "MLIR_SYS_200_PREFIX=/usr/lib/llvm-20" >> "$GITHUB_ENV"
+          echo "LLVM_SYS_201_PREFIX=/usr/lib/llvm-20" >> "$GITHUB_ENV"
+          echo "TABLEGEN_200_PREFIX=/usr/lib/llvm-20" >> "$GITHUB_ENV"
 
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -275,9 +195,7 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            cross_pkg: gcc-aarch64-linux-gnu
-            linker_env: CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+            os: ubuntu-24.04-arm
           - target: aarch64-apple-darwin
             os: macos-latest
           - target: x86_64-apple-darwin
@@ -286,11 +204,31 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Install cross-compilation toolchain
-        if: matrix.cross_pkg != ''
+      - name: Install LLVM 20 & MLIR 20 development libraries (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ${{ matrix.cross_pkg }}
+          sudo apt-get install -y --no-install-recommends ca-certificates curl gnupg lsb-release
+          CODENAME="$(lsb_release -cs)"
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] http://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-20 main" | sudo tee /etc/apt/sources.list.d/llvm-20.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang llvm-20-dev libmlir-20-dev mlir-20-tools libpolly-20-dev zlib1g-dev libzstd-dev
+          echo "MLIR_SYS_200_PREFIX=/usr/lib/llvm-20" >> "$GITHUB_ENV"
+          echo "LLVM_SYS_201_PREFIX=/usr/lib/llvm-20" >> "$GITHUB_ENV"
+          echo "TABLEGEN_200_PREFIX=/usr/lib/llvm-20" >> "$GITHUB_ENV"
+
+      - name: Install LLVM 20 & MLIR 20 development libraries (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install llvm@20
+          LLVM_PREFIX="$(brew --prefix llvm@20)"
+          BREW_LIB="$(brew --prefix)/lib"
+          echo "MLIR_SYS_200_PREFIX=${LLVM_PREFIX}" >> "$GITHUB_ENV"
+          echo "LLVM_SYS_201_PREFIX=${LLVM_PREFIX}" >> "$GITHUB_ENV"
+          echo "TABLEGEN_200_PREFIX=${LLVM_PREFIX}" >> "$GITHUB_ENV"
+          echo "LIBRARY_PATH=${BREW_LIB}" >> "$GITHUB_ENV"
 
       - name: Install Rust stable toolchain for ${{ matrix.target }}
         uses: dtolnay/rust-toolchain@stable
@@ -303,11 +241,7 @@ jobs:
           key: release-${{ matrix.target }}
 
       - name: Build workspace binaries (--release --locked)
-        run: |
-          if [[ -n "${{ matrix.linker_env }}" ]]; then
-            export "${{ matrix.linker_env }}"
-          fi
-          cargo build --workspace --bins --release --locked --target "${{ matrix.target }}"
+        run: cargo build --workspace --bins --release --locked --target "${{ matrix.target }}"
 
       - name: Package release archive & SHA-256 checksum
         shell: bash

@@ -1,0 +1,15 @@
+[package]
+name = "coblang-syntax"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Context-sensitive COBOL lexer, four-division typed AST, and resilient recursive-descent/Pratt parser."
+
+[dependencies]
+coblang-common.workspace = true
+coblang-diag.workspace = true
+coblang-pp.workspace = true
+
+[lints]
+workspace = true

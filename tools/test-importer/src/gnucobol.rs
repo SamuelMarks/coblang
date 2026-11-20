@@ -69,13 +69,12 @@ pub fn parse_m4_calls(source: &str, source_file: &str) -> Result<Vec<M4MacroCall
     let mut i = 0;
     let mut line = 1_u32;
 
-    while i < bytes.len() {
-        let b = bytes[i];
+    while let Some(&b) = bytes.get(i) {
         if b == 0x0A {
             line += 1;
             i += 1;
         } else if b == b'#' {
-            while i < bytes.len() && bytes[i] != 0x0A {
+            while bytes.get(i).is_some_and(|&c| c != 0x0A) {
                 i += 1;
             }
         } else if b == b'[' {
@@ -84,15 +83,15 @@ pub fn parse_m4_calls(source: &str, source_file: &str) -> Result<Vec<M4MacroCall
             line = next_ln;
         } else if is_ident_start(b) {
             let start = i;
-            while i < bytes.len() && is_ident_continue(bytes[i]) {
+            while bytes.get(i).copied().is_some_and(is_ident_continue) {
                 i += 1;
             }
             let ident = &source[start..i];
             if ident == "dnl" {
-                while i < bytes.len() && bytes[i] != 0x0A {
+                while bytes.get(i).is_some_and(|&c| c != 0x0A) {
                     i += 1;
                 }
-            } else if i < bytes.len() && bytes[i] == b'(' && is_tracked_macro(ident, &macros) {
+            } else if bytes.get(i) == Some(&b'(') && is_tracked_macro(ident, &macros) {
                 let call_line = line;
                 let (args, next_i, next_ln) = read_m4_arg_list(source, i, line, source_file)?;
                 i = next_i;
@@ -208,8 +207,7 @@ fn read_m4_bracketed(
     let mut depth = 1_usize;
     let mut i = open_idx + 1;
     let mut line = start_line;
-    while i < bytes.len() {
-        let b = bytes[i];
+    while let Some(&b) = bytes.get(i) {
         if b == 0x0A {
             line += 1;
         } else if b == b'[' {
@@ -228,6 +226,15 @@ fn read_m4_bracketed(
         line: start_line as usize,
         message: String::from("unterminated M4 `[` block"),
     })
+}
+
+/// Quoting style observed while scanning a single M4 macro argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum M4ArgQuoting {
+    /// Unquoted argument text requiring trim and quadrigraph decoding.
+    Unbracketed,
+    /// Argument contained `[...]` M4 quoting preserving verbatim whitespace.
+    Bracketed,
 }
 
 /// Reads a `(arg1, arg2, ...)` M4 argument list handling nested `[...]` and `(...)`.
@@ -252,22 +259,21 @@ fn read_m4_arg_list(
     let mut args = Vec::new();
     let mut cur = String::new();
     let mut paren_depth = 1_usize;
-    let mut saw_bracket_for_cur = false;
+    let mut quoting = M4ArgQuoting::Unbracketed;
     let mut i = open_paren + 1;
     let mut line = start_line;
 
-    while i < bytes.len() {
-        let b = bytes[i];
+    while let Some(&b) = bytes.get(i) {
         if b == b'[' {
             let (inner, next_i, next_ln) = read_m4_bracketed(source, i, line, source_file)?;
             cur.push_str(&inner);
-            saw_bracket_for_cur = true;
+            quoting = M4ArgQuoting::Bracketed;
             i = next_i;
             line = next_ln;
             continue;
         }
         if b == b'#' {
-            while i < bytes.len() && bytes[i] != 0x0A {
+            while bytes.get(i).is_some_and(|&c| c != 0x0A) {
                 i += 1;
             }
             continue;
@@ -281,16 +287,19 @@ fn read_m4_arg_list(
         } else if b == b')' {
             paren_depth -= 1;
             if paren_depth == 0 {
-                if !args.is_empty() || !cur.is_empty() || saw_bracket_for_cur {
-                    push_m4_arg(&mut args, &mut cur, saw_bracket_for_cur);
+                if !args.is_empty() || !cur.is_empty() || quoting == M4ArgQuoting::Bracketed {
+                    push_m4_arg(&mut args, &mut cur, quoting);
                 }
                 return Ok((args, i + 1, line));
             }
             cur.push(')');
         } else if b == b',' && paren_depth == 1 {
-            push_m4_arg(&mut args, &mut cur, saw_bracket_for_cur);
-            saw_bracket_for_cur = false;
-        } else if !(cur.is_empty() && !saw_bracket_for_cur && b.is_ascii_whitespace()) {
+            push_m4_arg(&mut args, &mut cur, quoting);
+            quoting = M4ArgQuoting::Unbracketed;
+        } else if !(cur.is_empty()
+            && quoting == M4ArgQuoting::Unbracketed
+            && b.is_ascii_whitespace())
+        {
             cur.push(char::from(b));
         }
         i += 1;
@@ -309,13 +318,12 @@ fn read_m4_arg_list(
 ///
 /// * `args` - Output argument list.
 /// * `cur` - Accumulated current argument text.
-/// * `saw_bracket` - Whether `[...]` quoting was used in this argument.
-fn push_m4_arg(args: &mut Vec<String>, cur: &mut String, saw_bracket: bool) {
+/// * `quoting` - Quoting mode observed for the argument.
+fn push_m4_arg(args: &mut Vec<String>, cur: &mut String, quoting: M4ArgQuoting) {
     let raw = std::mem::take(cur);
-    if saw_bracket {
-        args.push(raw);
-    } else {
-        args.push(decode_quadrigraphs(raw.trim()));
+    match quoting {
+        M4ArgQuoting::Bracketed => args.push(raw),
+        M4ArgQuoting::Unbracketed => args.push(decode_quadrigraphs(raw.trim())),
     }
 }
 
@@ -424,6 +432,8 @@ struct SetupGroupBuilder {
     known_files: BTreeSet<String>,
     /// Map of `expout`/`experr` contents written via `AT_DATA`.
     named_outputs: BTreeMap<String, String>,
+    /// Persistent `export KEY=VAL` bindings active across subsequent commands in this group.
+    exported_env: Vec<(String, String)>,
     /// Ordered execution steps.
     steps: Vec<TestStep>,
     /// Required capabilities inferred from `AT_SKIP_IF` / manual screen macros.
@@ -477,6 +487,7 @@ fn build_manifests_from_calls(
                 files: Vec::new(),
                 known_files: BTreeSet::new(),
                 named_outputs: BTreeMap::new(),
+                exported_env: Vec::new(),
                 steps: Vec::new(),
                 capabilities: caps,
                 xfail_reason: None,
@@ -609,12 +620,27 @@ fn apply_at_check(group: &mut SetupGroupBuilder, args: &[String]) {
     let stdout_arg = args.get(2).map_or("", String::as_str);
     let stderr_arg = args.get(3).map_or("", String::as_str);
 
+    let mut joined_lines: Vec<String> = Vec::new();
+    let mut pending = String::new();
     for raw_line in cmd_raw.lines() {
         let trimmed = raw_line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
+        if pending.is_empty() && (trimmed.is_empty() || trimmed.starts_with('#')) {
             continue;
         }
-        for subcmd in trimmed.split(';').flat_map(|s| s.split("&&")) {
+        if let Some(prefix) = trimmed.strip_suffix('\\') {
+            pending.push_str(prefix);
+            pending.push(' ');
+        } else {
+            pending.push_str(trimmed);
+            joined_lines.push(std::mem::take(&mut pending));
+        }
+    }
+    if !pending.trim().is_empty() {
+        joined_lines.push(pending);
+    }
+
+    for joined in &joined_lines {
+        for subcmd in joined.split(';').flat_map(|s| s.split("&&")) {
             let clean = subcmd.trim();
             if !clean.is_empty() {
                 translate_shell_line(group, clean, expected_code, stdout_arg, stderr_arg);
@@ -639,10 +665,25 @@ fn translate_shell_line(
     stdout_arg: &str,
     stderr_arg: &str,
 ) {
-    let (env_vars, tokens) = split_env_and_tokens(line);
+    let (line_env, tokens) = split_env_and_tokens(line);
     let Some(head) = tokens.first().map(String::as_str) else {
+        for (k, v) in line_env {
+            if let Some(slot) = group.exported_env.iter_mut().find(|(ek, _)| ek == &k) {
+                slot.1 = v;
+            } else {
+                group.exported_env.push((k, v));
+            }
+        }
         return;
     };
+    let mut env_vars = group.exported_env.clone();
+    for (k, v) in line_env {
+        if let Some(slot) = env_vars.iter_mut().find(|(ek, _)| ek == &k) {
+            slot.1 = v;
+        } else {
+            env_vars.push((k, v));
+        }
+    }
 
     if matches!(
         head,
@@ -659,7 +700,7 @@ fn translate_shell_line(
         if let Some(step) = build_cobc_step(
             group,
             head,
-            &tokens[1..],
+            tokens.get(1..).unwrap_or(&[]),
             env_vars,
             expected_code,
             stderr_arg,
@@ -667,7 +708,7 @@ fn translate_shell_line(
             group.steps.push(step);
         }
     } else if matches!(head, "$CC" | "$COMPILE_C") {
-        if let Some(step) = build_cc_step(&tokens[1..]) {
+        if let Some(step) = build_cc_step(tokens.get(1..).unwrap_or(&[])) {
             group.capabilities.insert(Capability::CCompiler);
             group.steps.push(step);
         }
@@ -695,6 +736,49 @@ fn translate_shell_line(
         prev_run
             .expected_files
             .push((target_file.trim_start_matches("./").to_string(), matcher));
+    } else if head == "$DIFF"
+        && expected_code == 0
+        && let (Some(ref_arg), Some(target_arg)) = (tokens.get(1), tokens.get(2))
+    {
+        append_diff_file_expectation(group, ref_arg, target_arg);
+    }
+}
+
+/// Attaches a `$DIFF ref target` file expectation onto the most recent `RunBinary` step in `group`.
+///
+/// # Arguments
+///
+/// * `group` - Active group builder.
+/// * `ref_arg` - Reference filename argument to `$DIFF`.
+/// * `target_arg` - Produced output filename argument to `$DIFF`.
+fn append_diff_file_expectation(group: &mut SetupGroupBuilder, ref_arg: &str, target_arg: &str) {
+    let ref_clean = ref_arg.trim_start_matches("./");
+    let target_clean = target_arg.trim_start_matches("./").to_string();
+    let ref_bytes = group
+        .steps
+        .iter()
+        .rev()
+        .find_map(|st| match st {
+            TestStep::WriteFile(wf) if wf.relative_path == ref_clean => Some(wf.contents.clone()),
+            _ => None,
+        })
+        .or_else(|| {
+            group
+                .files
+                .iter()
+                .find(|wf| wf.relative_path == ref_clean)
+                .map(|wf| wf.contents.clone())
+        });
+    if let Some(expected_bytes) = ref_bytes
+        && let Some(prev_run) = group.steps.iter_mut().rev().find_map(|st| match st {
+            TestStep::RunBinary(rb) => Some(rb),
+            _ => None,
+        })
+    {
+        prev_run.expected_files.push((
+            target_clean,
+            OutputMatcher::Exact(String::from_utf8_lossy(&expected_bytes).into_owned()),
+        ));
     }
 }
 
@@ -708,8 +792,8 @@ fn split_env_and_tokens(line: &str) -> (Vec<(String, String)>, Vec<String>) {
     let raw_toks = shell_like_split(line);
     let mut env = Vec::new();
     let mut idx = 0;
-    while idx < raw_toks.len() {
-        let tok = raw_toks[idx].as_str();
+    while let Some(raw_tok) = raw_toks.get(idx) {
+        let tok = raw_tok.as_str();
         if tok == "export" {
             idx += 1;
             continue;
@@ -727,7 +811,7 @@ fn split_env_and_tokens(line: &str) -> (Vec<(String, String)>, Vec<String>) {
         }
         break;
     }
-    (env, raw_toks[idx..].to_vec())
+    (env, raw_toks.get(idx..).unwrap_or(&[]).to_vec())
 }
 
 /// Splits a shell command line into words respecting `'...'` and `"..."` quotes.
@@ -797,8 +881,8 @@ fn build_cobc_step(
     let mut output = String::new();
 
     let mut i = 0;
-    while i < rest.len() {
-        let tok = rest[i].as_str();
+    while let Some(raw_tok) = rest.get(i) {
+        let tok = raw_tok.as_str();
         match tok {
             "-x" => mode = CompilationMode::BuildExecutable,
             "-m" | "-b" => mode = CompilationMode::CompileModule,
@@ -852,7 +936,8 @@ fn build_cobc_step(
         return None;
     }
     if output.is_empty() && mode == CompilationMode::BuildExecutable {
-        let first_stem = Path::new(&sources[0])
+        let first_src = sources.first().map_or("prog.cob", String::as_str);
+        let first_stem = Path::new(first_src)
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("prog");
@@ -930,8 +1015,8 @@ fn build_cc_step(rest: &[String]) -> Option<TestStep> {
     let mut shared = false;
     let mut output = String::from("helper.o");
     let mut i = 0;
-    while i < rest.len() {
-        let t = rest[i].as_str();
+    while let Some(raw_tok) = rest.get(i) {
+        let t = raw_tok.as_str();
         if matches!(t, "-shared" | "-m") {
             shared = true;
         } else if t == "-o" {
@@ -974,7 +1059,7 @@ fn build_run_step(
     stdout_arg: &str,
     stderr_arg: &str,
 ) -> TestStep {
-    let via_cobcrun = head == "$COBCRUN";
+    let mut via_cobcrun = head == "$COBCRUN";
     let start_idx = usize::from(!head.starts_with("./"));
     let mut target = String::from("./prog");
     let mut prog_args = Vec::new();
@@ -982,8 +1067,15 @@ fn build_run_step(
 
     let mut idx = start_idx;
     let mut seen_target = false;
-    while idx < tokens.len() {
-        let tok = tokens[idx].as_str();
+    while let Some(raw_tok) = tokens.get(idx) {
+        let tok = raw_tok.as_str();
+        if !seen_target && matches!(tok, "$COBCRUN_DIRECT" | "$COBCRUN" | "$RUN_PROG_MANUAL") {
+            if tok == "$COBCRUN" {
+                via_cobcrun = true;
+            }
+            idx += 1;
+            continue;
+        }
         if tok == "<" {
             if let Some(inp_name) = tokens.get(idx + 1) {
                 let clean = inp_name.trim_start_matches("./");

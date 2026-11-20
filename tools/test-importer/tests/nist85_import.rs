@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use coblang_common::{NistModule, Result, TestOutcome, encode_manifest_bundle};
+use coblang_common::{CoblangError, NistModule, Result, TestOutcome, encode_manifest_bundle};
 use coblang_test_importer::nist85::{
     Exec85Config, build_nist_manifests_from_archive, extract_newcob_from_str, import_nist85_suite,
     nist_program_extra_flags, parse_exec85_config, parse_module_baseline, preprocess_exec85_lines,
@@ -11,7 +11,7 @@ use coblang_test_importer::nist85::{
 use coblang_test_runner::capabilities::HostCapabilities;
 use coblang_test_runner::cli::resolve_oracle_backend;
 use coblang_test_runner::engine::{
-    CompilerBackend, RunnerConfig, execute_single_test, execute_suite_parallel,
+    CompilerBackend, RunnerConfig, SandboxRetention, execute_single_test, execute_suite_parallel,
 };
 
 /// Exercises `EXEC85` config parsing, col-7 optional switches, `XXXX` substitution, and error cases.
@@ -36,6 +36,9 @@ ab
 ignored non-seq
 *END-UPDATE
 "#;
+    let empty_start =
+        parse_exec85_config("*BEGIN-UPDATE\u{000a}*START \u{0020}\u{000a}*END-UPDATE\u{000a}");
+    assert!(empty_start.updates.is_empty());
     let mut cfg = parse_exec85_config(conf);
     assert!(cfg.kill_deletions);
     assert_eq!(
@@ -157,7 +160,9 @@ fn import_all_12_nist_modules_and_verify_cobc_oracle() -> Result<()> {
 
     let mut all_manifests = Vec::new();
     for (m, exp_len) in expected_counts {
-        let list = &by_module[&m];
+        let list = by_module.get(&m).ok_or_else(|| CoblangError::InvalidCli {
+            message: format!("missing module {}", m.code()),
+        })?;
         assert_eq!(
             list.len(),
             exp_len,
@@ -176,7 +181,7 @@ fn import_all_12_nist_modules_and_verify_cobc_oracle() -> Result<()> {
     let scaf_cfg = RunnerConfig {
         backend: CompilerBackend::InProcessScaffold,
         sandbox_root: std::env::temp_dir().join("coblang-nist-dryrun"),
-        preserve_on_failure: false,
+        sandbox_retention: SandboxRetention::CleanAlways,
         c_compiler: PathBuf::from("clang"),
         capabilities: HostCapabilities::detect_host(),
         jobs: 8,
@@ -196,16 +201,23 @@ fn import_all_12_nist_modules_and_verify_cobc_oracle() -> Result<()> {
     let oracle_cfg = RunnerConfig {
         backend: resolve_oracle_backend(Some("cobc"))?,
         sandbox_root: std::env::temp_dir().join("coblang-nist-oracle"),
-        preserve_on_failure: false,
+        sandbox_retention: SandboxRetention::CleanAlways,
         c_compiler: PathBuf::from("clang"),
         capabilities: HostCapabilities::detect_host(),
         jobs: 1,
     };
-    for (slot, target) in [
-        (0, &by_module[&NistModule::Nc][0]),
-        (1, &by_module[&NistModule::Sm][0]),
-        (2, &by_module[&NistModule::Ic][0]),
+    for (slot, m) in [
+        (0, NistModule::Nc),
+        (1, NistModule::Sm),
+        (2, NistModule::Ic),
     ] {
+        let target =
+            by_module
+                .get(&m)
+                .and_then(|v| v.first())
+                .ok_or_else(|| CoblangError::InvalidCli {
+                    message: format!("missing first test in {}", m.code()),
+                })?;
         let res = execute_single_test(target, &oracle_cfg, slot)?;
         assert_eq!(
             res.outcome,

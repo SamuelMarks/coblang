@@ -3,14 +3,17 @@
 use std::error::Error as StdError;
 
 use coblang_common::{
-    Capability, CoblangError, CompilationMode, CompileCSpec, CompileCobolSpec, DiagnosticSeverity,
-    Dialect, ExpectedDiagnostic, FeatureTag, NistModule, OptimizationLevel, OutputMatcher,
-    Provenance, Result, RunBinarySpec, SourceFormat, SuiteId, TestManifest, TestOutcome, TestStep,
-    TextEncoding, WorkspaceFile, decode_manifest_bundle, encode_manifest_bundle, hex_decode,
-    hex_decode_utf8, hex_encode,
+    ByteLength, ByteOffset, Capability, CoblangError, CobolExitCode, ColumnNumber, CompilationMode,
+    CompileCSpec, CompileCobolSpec, DataItemId, DiagnosticSeverity, Dialect, DigitCount,
+    ExpansionId, ExpectedDiagnostic, FeatureTag, FileConnectorId, FileId, FileStatusCode,
+    FileStatusKind, LevelNumber, LineNumber, NistModule, OptimizationLevel, OutputMatcher,
+    ProcedureId, ProgramUnitId, Provenance, ReportId, ResolvedLocation, ResourceLimitKind, Result,
+    RunBinarySpec, ScaleFactor, ScopeId, SourceFormat, SourceSpan, SuiteId, SymbolId, TestManifest,
+    TestOutcome, TestStep, TextEncoding, WorkspaceFile, decode_manifest_bundle,
+    encode_manifest_bundle, hex_decode, hex_decode_utf8, hex_encode,
 };
 
-/// Exercises all variants and `Display`/`Error` implementations of [`CoblangError`].
+/// Exercises harness/frontend `Display` and `Error` implementations of [`CoblangError`].
 #[test]
 fn all_error_variants_format_cleanly() -> Result<()> {
     let io_err: CoblangError = std::io::Error::other("disk full").into();
@@ -18,7 +21,7 @@ fn all_error_variants_format_cleanly() -> Result<()> {
     assert!(io_err.source().is_some());
     assert_ne!(format!("{io_err:?}"), "");
 
-    let others = [
+    let frontend_errors = [
         CoblangError::InvalidCli {
             message: String::from("bad flag"),
         },
@@ -42,8 +45,51 @@ fn all_error_variants_format_cleanly() -> Result<()> {
         CoblangError::RatchetViolation {
             summary: String::from("1 regression"),
         },
+        CoblangError::ConfigLoad {
+            path: String::from("default.conf"),
+            line: 12,
+            message: String::from("unknown key"),
+        },
+        CoblangError::EncodingConversion {
+            encoding: TextEncoding::Ebcdic,
+            byte_offset: 4,
+            message: String::from("invalid byte"),
+        },
+        CoblangError::PreprocessError {
+            file: String::from("p.cob"),
+            line: 1,
+            column: 7,
+            message: String::from("bad continuation"),
+        },
+        CoblangError::LexError {
+            file: String::from("p.cob"),
+            line: 2,
+            column: 12,
+            message: String::from("unterminated string"),
+        },
+        CoblangError::ParseError {
+            file: String::from("p.cob"),
+            line: 3,
+            column: 8,
+            expected: String::from("DIVISION"),
+            found: String::from("EOF"),
+        },
+        CoblangError::SemanticError {
+            diagnostic_count: 2,
+            first_message: String::from("undefined identifier X"),
+        },
+        CoblangError::InvalidDomainValue {
+            domain_type: "LevelNumber",
+            value: String::from("50"),
+            reason: String::from("out of range"),
+        },
+        CoblangError::HirLowering {
+            construct: "MOVE CORRESPONDING",
+            location: String::from("p.cob:10:12"),
+            message: String::from("not a group"),
+        },
     ];
-    for err in &others {
+    for err in &frontend_errors {
         assert_ne!(err.to_string(), "");
         assert!(err.source().is_none());
     }
@@ -52,6 +98,82 @@ fn all_error_variants_format_cleanly() -> Result<()> {
     assert_eq!(coblang_test_importer::importer_smoke_check("abc")?, 3);
     assert!(coblang_test_importer::importer_smoke_check("").is_err());
     Ok(())
+}
+
+/// Exercises MLIR, codegen, and runtime `Display`/`Error` variants of [`CoblangError`].
+#[test]
+fn backend_and_runtime_error_variants_format_cleanly() {
+    let backend_errors = [
+        CoblangError::MlirVerification {
+            stage: "cobol-dialect",
+            ir_snippet: String::from("cobol.move"),
+            message: String::from("missing operand"),
+        },
+        CoblangError::MlirPassExecution {
+            pass_pipeline: String::from("lower-to-llvm"),
+            message: String::from("pass failed"),
+        },
+        CoblangError::CodegenTarget {
+            triple: String::from("unknown-triple"),
+            message: String::from("no target"),
+        },
+        CoblangError::LinkerInvocation {
+            linker_bin: String::from("clang"),
+            exit_code: Some(1),
+            stderr: String::from("undefined symbol"),
+        },
+        CoblangError::DecimalDomain {
+            operation: "DIVIDE",
+            message: String::from("division by zero"),
+        },
+        CoblangError::PictureCodec {
+            picture: String::from("9(40)"),
+            message: String::from("too wide"),
+        },
+        CoblangError::RuntimeFileIo {
+            file_name: String::from("INFILE"),
+            status: FileStatusKind::FileNotFound35.code(),
+            message: String::from("missing file"),
+        },
+        CoblangError::IsamStorage {
+            path: String::from("idx.dat"),
+            page_id: 3,
+            message: String::from("bad crc"),
+        },
+        CoblangError::SortMerge {
+            message: String::from("nested sort active"),
+        },
+        CoblangError::ReportEngine {
+            report_name: String::from("RPT1"),
+            message: String::from("not initiated"),
+        },
+        CoblangError::ScreenBackend {
+            message: String::from("pty closed"),
+        },
+        CoblangError::XmlJsonProcess {
+            kind: "XML",
+            offset: 9,
+            message: String::from("unclosed tag"),
+        },
+        CoblangError::DynamicModuleLoad {
+            module_name: String::from("SUBPROG"),
+            searched_paths: String::from("."),
+            message: String::from("not found"),
+        },
+        CoblangError::AbiNullOrInvalidPointer {
+            symbol: "cob_move",
+            param_name: "src",
+        },
+        CoblangError::UnimplementedFeature {
+            feature: FeatureTag::FeatureOo,
+            construct: String::from("CLASS-ID"),
+            location: String::from("oo.cob:1:8"),
+        },
+    ];
+    for err in &backend_errors {
+        assert_ne!(err.to_string(), "");
+        assert!(err.source().is_none());
+    }
 }
 
 /// Exercises round-trip parsing and invalid-token branches for compiler domain enums.
@@ -496,7 +618,9 @@ fn assert_step_column_mutations_fail(hdr: &str, base_cobol: &str, base_run: &str
         (17, "zz"),
     ] {
         let mut c = cobol_cols.clone();
-        c[idx] = bad_val;
+        if let Some(slot) = c.get_mut(idx) {
+            *slot = bad_val;
+        }
         let line = c.join("\u{0009}");
         let doc = format!("{hdr}\u{000a}TEST\u{0009}61\u{000a}{line}\u{000a}END_TEST");
         assert!(decode_manifest_bundle(&doc).is_err());
@@ -515,9 +639,164 @@ fn assert_step_column_mutations_fail(hdr: &str, base_cobol: &str, base_run: &str
         (11, "x"),
     ] {
         let mut c = run_cols.clone();
-        c[idx] = bad_val;
+        if let Some(slot) = c.get_mut(idx) {
+            *slot = bad_val;
+        }
         let line = c.join("\u{0009}");
         let doc = format!("{hdr}\u{000a}TEST\u{0009}61\u{000a}{line}\u{000a}END_TEST");
         assert!(decode_manifest_bundle(&doc).is_err());
     }
+}
+
+/// Exercises every constructor, accessor, and merge branch in `ids` and `span`.
+#[test]
+fn strong_typed_ids_and_spans_roundtrip() -> Result<()> {
+    assert_eq!(FileId::new(4).as_u32(), 4);
+    assert!(ExpansionId::ROOT.is_root());
+    assert!(!ExpansionId::new(2).is_root());
+    assert_eq!(ExpansionId::new(2).as_u32(), 2);
+    assert_eq!(SymbolId::new(9).as_u32(), 9);
+    assert_eq!(ScopeId::new(3).as_u32(), 3);
+    assert_eq!(ProgramUnitId::new(1).as_u32(), 1);
+    assert_eq!(DataItemId::new(7).as_u32(), 7);
+    assert_eq!(ProcedureId::new(5).as_u32(), 5);
+    assert_eq!(FileConnectorId::new(6).as_u32(), 6);
+    assert_eq!(ReportId::new(8).as_u32(), 8);
+
+    assert_eq!(ByteOffset::ZERO.as_u32(), 0);
+    assert_eq!(ByteLength::ZERO.as_u32(), 0);
+    let advanced = ByteOffset::new(10).checked_advance(ByteLength::new(5))?;
+    assert_eq!(advanced.as_u32(), 15);
+    assert_eq!(advanced.checked_sub(ByteLength::new(5))?.as_u32(), 10);
+    assert!(
+        ByteOffset::new(u32::MAX)
+            .checked_advance(ByteLength::new(1))
+            .is_err()
+    );
+    assert!(ByteOffset::new(3).checked_sub(ByteLength::new(4)).is_err());
+
+    let len_sum = ByteLength::new(7).checked_add(ByteLength::new(8))?;
+    assert_eq!(len_sum.as_u32(), 15);
+    assert_eq!(len_sum.checked_sub(ByteLength::new(8))?.as_u32(), 7);
+    assert!(
+        ByteLength::new(u32::MAX)
+            .checked_add(ByteLength::new(1))
+            .is_err()
+    );
+    assert!(ByteLength::new(2).checked_sub(ByteLength::new(3)).is_err());
+
+    assert_eq!(LineNumber::ONE.get(), 1);
+    assert_eq!(LineNumber::from_zero_based(0).get(), 1);
+    assert_eq!(LineNumber::from_zero_based(4).get(), 5);
+    assert_eq!(LineNumber::try_from_one_based(42)?.get(), 42);
+    assert!(LineNumber::try_from_one_based(0).is_err());
+
+    assert_eq!(ColumnNumber::ONE.get(), 1);
+    assert_eq!(ColumnNumber::from_zero_based(0).get(), 1);
+    assert_eq!(ColumnNumber::from_zero_based(9).get(), 10);
+    assert_eq!(ColumnNumber::try_from_one_based(12)?.get(), 12);
+    assert!(ColumnNumber::try_from_one_based(0).is_err());
+
+    let sp_a = SourceSpan::new(
+        FileId::new(0),
+        ByteOffset::new(10),
+        ByteLength::new(4),
+        ExpansionId::ROOT,
+    );
+    let sp_b = SourceSpan::new(
+        FileId::new(0),
+        ByteOffset::new(20),
+        ByteLength::new(5),
+        ExpansionId::ROOT,
+    );
+    let sp_inner = SourceSpan::new(
+        FileId::new(0),
+        ByteOffset::new(11),
+        ByteLength::new(1),
+        ExpansionId::ROOT,
+    );
+    let sp_other_file = SourceSpan::new(
+        FileId::new(1),
+        ByteOffset::new(0),
+        ByteLength::new(3),
+        ExpansionId::ROOT,
+    );
+    assert_eq!(sp_a.merge(sp_b).start.as_u32(), 10);
+    assert_eq!(sp_a.merge(sp_b).len.as_u32(), 15);
+    assert_eq!(sp_b.merge(sp_a).start.as_u32(), 10);
+    assert_eq!(sp_b.merge(sp_a).len.as_u32(), 15);
+    assert_eq!(sp_a.merge(sp_inner).len.as_u32(), 4);
+    assert_eq!(sp_a.merge(sp_other_file), sp_a);
+
+    let loc = ResolvedLocation {
+        file_path: String::from("prog.cob"),
+        line: LineNumber::try_from_one_based(7)?,
+        column: ColumnNumber::try_from_one_based(8)?,
+    };
+    assert_eq!(loc.to_header_prefix(), "prog.cob:7:8");
+    Ok(())
+}
+
+/// Exercises every constructor, accessor, and validation branch in `bounds`.
+#[test]
+fn strong_typed_bounds_and_file_status_roundtrip() -> Result<()> {
+    assert_eq!(LevelNumber::parse(1)?.as_u8(), 1);
+    assert_eq!(LevelNumber::parse(49)?.as_u8(), 49);
+    assert_eq!(LevelNumber::parse(66)?.as_u8(), 66);
+    assert_eq!(LevelNumber::parse(77)?.as_u8(), 77);
+    assert_eq!(LevelNumber::parse(78)?.as_u8(), 78);
+    assert_eq!(LevelNumber::parse(88)?.as_u8(), 88);
+    assert!(LevelNumber::parse(0).is_err());
+    assert!(LevelNumber::parse(50).is_err());
+    assert!(LevelNumber::parse(99).is_err());
+
+    assert_eq!(DigitCount::ONE.get(), 1);
+    let d18 = DigitCount::try_new(18)?.validate_for_dialect(DigitCount::MAX_COBOL85_DIGITS)?;
+    assert_eq!(d18.get(), 18);
+    let d38 = DigitCount::try_new(38)?.validate_for_dialect(DigitCount::MAX_ISO_DIGITS)?;
+    assert_eq!(d38.get(), 38);
+    assert!(
+        d38.validate_for_dialect(DigitCount::MAX_COBOL85_DIGITS)
+            .is_err()
+    );
+    assert!(DigitCount::try_new(0).is_err());
+    assert!(DigitCount::try_new(39).is_err());
+
+    assert_eq!(ScaleFactor::ZERO.get(), 0);
+    assert_eq!(ScaleFactor::try_new(-5)?.get(), -5);
+    assert_eq!(ScaleFactor::try_new(12)?.get(), 12);
+    assert!(ScaleFactor::try_new(-39).is_err());
+    assert!(ScaleFactor::try_new(39).is_err());
+
+    assert_eq!(CobolExitCode::SUCCESS.as_u8(), 0);
+    assert_eq!(CobolExitCode::ERROR.as_u8(), 1);
+    assert_eq!(CobolExitCode::UNIMPLEMENTED.as_u8(), 78);
+    assert_eq!(CobolExitCode::new(42).as_u8(), 42);
+
+    assert_eq!(FileStatusKind::ALL.len(), 28);
+    for &kind in FileStatusKind::ALL {
+        let code = FileStatusCode::from_kind(kind);
+        assert_eq!(kind.code(), code);
+        assert_eq!(code.kind(), Some(kind));
+        assert_eq!(FileStatusCode::try_from_ascii(*code.as_bytes())?, code);
+        assert_eq!(code.as_str().len(), 2);
+    }
+    let custom_status = FileStatusCode::try_from_ascii(*b"99")?;
+    assert_eq!(custom_status.kind(), None);
+    assert!(FileStatusKind::Success00.code().is_success());
+    assert!(!FileStatusKind::FileNotFound35.code().is_success());
+    assert!(FileStatusCode::try_from_ascii(*b" 0").is_err());
+    assert!(FileStatusCode::try_from_ascii(*b"0 ").is_err());
+
+    assert_eq!(ResourceLimitKind::ALL.len(), 6);
+    for &rk in ResourceLimitKind::ALL {
+        let err = CoblangError::ResourceLimitExceeded {
+            resource: rk,
+            limit: 10,
+            observed: 11,
+        };
+        assert!(err.to_string().contains(rk.as_str()));
+    }
+
+    Ok(())
 }

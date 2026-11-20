@@ -44,6 +44,15 @@ pub enum DgAction {
     Run,
 }
 
+/// Whether `dg-options` pinned an explicit `-O*` optimization flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DgOptPin {
+    /// No `-O*` flag appeared in `dg-options`; eligible for torture optimization sweep.
+    Unpinned,
+    /// An explicit `-O*` flag appeared in `dg-options`.
+    Explicit,
+}
+
 /// Structured accumulation of all `{ dg-... }` directives extracted from a `.cob` file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedDejaGnuDirectives {
@@ -51,8 +60,8 @@ pub struct ParsedDejaGnuDirectives {
     pub action: DgAction,
     /// Raw option strings from `dg-options` and `dg-additional-options`.
     pub option_strings: Vec<String>,
-    /// Whether an explicit `-O*` flag was present in `dg-options`.
-    pub explicit_opt: bool,
+    /// Optimization pinning state derived from `dg-options`.
+    pub opt_pin: DgOptPin,
     /// Sequential regex fragments from `{ dg-output ... }`.
     pub output_regexes: Vec<String>,
     /// Companion expected output file path from `{ dg-output-file "..." }`.
@@ -96,26 +105,26 @@ pub fn tokenize_tcl_words(body: &str, source_file: &str, line: usize) -> Result<
     let mut i = 0;
 
     while i < chars.len() {
-        while i < chars.len() && chars[i].is_ascii_whitespace() {
+        while chars.get(i).is_some_and(char::is_ascii_whitespace) {
             i += 1;
         }
-        if i >= chars.len() {
+        let Some(&ch) = chars.get(i) else {
             break;
-        }
-        if chars[i] == '"' {
+        };
+        if ch == '"' {
             let (word, next_i) = read_quoted_tcl_word(&chars, i + 1, source_file, line)?;
             words.push(word);
             i = next_i;
-        } else if chars[i] == '{' {
+        } else if ch == '{' {
             let (word, next_i) = read_braced_tcl_word(&chars, i + 1, source_file, line)?;
             words.push(word);
             i = next_i;
         } else {
             let start = i;
-            while i < chars.len() && !chars[i].is_ascii_whitespace() {
+            while chars.get(i).is_some_and(|c| !c.is_ascii_whitespace()) {
                 i += 1;
             }
-            words.push(chars[start..i].iter().collect());
+            words.push(chars.get(start..i).unwrap_or(&[]).iter().collect());
         }
     }
     Ok(words)
@@ -141,14 +150,15 @@ fn read_quoted_tcl_word(
 ) -> Result<(String, usize)> {
     let mut out = String::new();
     let mut i = start;
-    while i < chars.len() {
-        let ch = chars[i];
+    while let Some(&ch) = chars.get(i) {
         if ch == '"' {
             return Ok((out, i + 1));
         }
-        if ch == '\u{005c}' && i + 1 < chars.len() {
+        if ch == '\u{005c}'
+            && let Some(&esc) = chars.get(i + 1)
+        {
             i += 1;
-            match chars[i] {
+            match esc {
                 'n' => out.push('\u{000a}'),
                 'r' => out.push('\u{000d}'),
                 't' => out.push('\u{0009}'),
@@ -187,8 +197,7 @@ fn read_braced_tcl_word(
     let mut out = String::new();
     let mut depth = 1_usize;
     let mut i = start;
-    while i < chars.len() {
-        let ch = chars[i];
+    while let Some(&ch) = chars.get(i) {
         if ch == '{' {
             depth += 1;
             out.push(ch);
@@ -227,7 +236,7 @@ pub fn parse_dejagnu_directives(
     let mut parsed = ParsedDejaGnuDirectives {
         action: DgAction::Compile,
         option_strings: Vec::new(),
-        explicit_opt: false,
+        opt_pin: DgOptPin::Unpinned,
         output_regexes: Vec::new(),
         output_file: None,
         diagnostics: Vec::new(),
@@ -253,7 +262,7 @@ pub fn parse_dejagnu_directives(
         let line_no = idx + 1;
         if let Some(body) = extract_dg_brace_body(raw_line, source_file, line_no)? {
             let words = tokenize_tcl_words(&body, source_file, line_no)?;
-            let first = words[0].as_str();
+            let first = words.first().map_or("", String::as_str);
             if first == "dg-begin-multiline-output" {
                 in_multiline_output = true;
                 continue;
@@ -289,9 +298,9 @@ fn extract_dg_brace_body(
 ) -> Result<Option<String>> {
     let chars: Vec<char> = line_text.chars().collect();
     let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == '{' {
-            let rest: String = chars[i + 1..].iter().collect();
+    while let Some(&ch) = chars.get(i) {
+        if ch == '{' {
+            let rest: String = chars.get(i + 1..).unwrap_or(&[]).iter().collect();
             if rest.trim_start().starts_with("dg-") {
                 let (inner, _) = read_braced_tcl_word(&chars, i + 1, source_file, line_no)?;
                 return Ok(Some(inner));
@@ -322,12 +331,12 @@ fn apply_dg_directive(
     source_file: &str,
     line_no: usize,
 ) -> Result<()> {
-    match words[0].as_str() {
+    match words.first().map_or("", String::as_str) {
         "dg-do" => apply_dg_do(parsed, words, source_file, line_no)?,
         "dg-options" | "dg-additional-options" => {
             if let Some(opts) = words.get(1) {
                 if opts.split_whitespace().any(|t| t.starts_with("-O")) {
-                    parsed.explicit_opt = true;
+                    parsed.opt_pin = DgOptPin::Explicit;
                 }
                 parsed.option_strings.push(opts.clone());
             }
@@ -415,7 +424,7 @@ fn apply_dg_do(
 /// * `parsed` - Mutable directive accumulator.
 /// * `words` - Tokenized directive words.
 fn apply_dg_aux_directive(parsed: &mut ParsedDejaGnuDirectives, words: &[String]) {
-    match words[0].as_str() {
+    match words.first().map_or("", String::as_str) {
         "dg-excess-errors" => parsed.allow_excess_errors = true,
         "dg-prune-output" => {
             if let Some(pat) = words.get(1) {
@@ -451,7 +460,7 @@ fn apply_dg_aux_directive(parsed: &mut ParsedDejaGnuDirectives, words: &[String]
                 .get(1)
                 .filter(|s| !s.is_empty())
                 .cloned()
-                .unwrap_or_else(|| words[0].clone());
+                .unwrap_or_else(|| words.first().cloned().unwrap_or_default());
             parsed.xfail_reason = Some(note);
         }
         "dg-skip-if" => {
@@ -541,8 +550,7 @@ pub fn apply_gcobol_options(spec: &mut CompileCobolSpec, option_strings: &[Strin
     for raw in option_strings {
         let tokens: Vec<&str> = raw.split_whitespace().collect();
         let mut i = 0;
-        while i < tokens.len() {
-            let tok = tokens[i];
+        while let Some(&tok) = tokens.get(i) {
             match tok {
                 "-ffixed-form" => spec.format = SourceFormat::Fixed,
                 "-ffree-form" | "-free" => spec.format = SourceFormat::Free,
@@ -699,7 +707,7 @@ pub fn import_cobol_dg_file(
         }));
     }
 
-    let torture_optimizations = default_dg_torture_levels(dg.action, dg.explicit_opt);
+    let torture_optimizations = default_dg_torture_levels(dg.action, dg.opt_pin);
 
     Ok(TestManifest {
         id: format!("{id_prefix}/{stem}"),
@@ -728,10 +736,10 @@ pub fn import_cobol_dg_file(
 /// # Arguments
 ///
 /// * `action` - Parsed `dg-do` action.
-/// * `explicit_opt` - Whether `dg-options` explicitly specified an `-O` flag.
+/// * `opt_pin` - Whether `dg-options` explicitly specified an `-O` flag.
 #[must_use]
-fn default_dg_torture_levels(action: DgAction, explicit_opt: bool) -> Vec<OptimizationLevel> {
-    if action == DgAction::Run && !explicit_opt {
+fn default_dg_torture_levels(action: DgAction, opt_pin: DgOptPin) -> Vec<OptimizationLevel> {
+    if action == DgAction::Run && opt_pin == DgOptPin::Unpinned {
         vec![
             OptimizationLevel::O0,
             OptimizationLevel::O1,

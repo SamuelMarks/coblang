@@ -1,0 +1,14 @@
+[package]
+name = "coblang-pp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "COBOL reference-format scanner, COPY/REPLACE text manipulation, CDF directives, and source listings."
+
+[dependencies]
+coblang-common.workspace = true
+coblang-diag.workspace = true
+
+[lints]
+workspace = true

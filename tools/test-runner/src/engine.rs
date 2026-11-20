@@ -8,17 +8,41 @@ use coblang_common::{
     OutputMatcher, Result, RunBinarySpec, SourceFormat, SuiteId, TestManifest, TestOutcome,
     TestStep, TextEncoding,
 };
-use coblang_scaffold_driver::{EXIT_UNIMPLEMENTED, execute_cobcrun, execute_driver};
+use coblang_scaffold_driver::{
+    EXIT_UNIMPLEMENTED, execute_cobcrun, execute_compiler_driver, execute_driver,
+};
 
 use crate::capabilities::HostCapabilities;
-use crate::matcher::{verify_compile_diagnostics, verify_output};
+use crate::matcher::{
+    DiagnosticMessagePolicy, ExcessErrorPolicy, verify_compile_diagnostics, verify_output,
+};
 use crate::process::{CommandSpec, ProcessOutput, compile_c_companion, run_command_with_timeout};
+
+/// Policy controlling temporary sandbox cleanup after test execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxRetention {
+    /// Remove the per-test temporary sandbox directory unconditionally after classification.
+    CleanAlways,
+    /// Retain the per-test sandbox directory on disk when the test ends in [`TestOutcome::Fail`].
+    PreserveOnFailure,
+}
 
 /// Compiler backend used to execute COBOL compilation and `cobcrun` steps.
 #[derive(Debug, Clone)]
 pub enum CompilerBackend {
-    /// Fast in-process zero-compiler scaffold driver (`coblang-scaffold-driver`).
+    /// Fast in-process zero-compiler dry-run scaffold driver (`execute_driver`).
     InProcessScaffold,
+    /// In-process incremental `coblang` compiler pipeline (`execute_compiler_driver`).
+    InProcessCompiler,
+    /// Out-of-process compiled `coblang` + `cobcrun-shim` binaries supporting incremental `XFAIL`s (`78`).
+    CoblangCompiled {
+        /// Path to the compiled `coblang` binary.
+        compiler_bin: PathBuf,
+        /// Path to the compiled `cobcrun` / `cobcrun-shim` binary.
+        cobcrun_bin: PathBuf,
+        /// Timeout in milliseconds per compiler invocation.
+        compile_timeout_ms: u64,
+    },
     /// External compiler executable (`coblang`, `cobc`, `gcobol`, or canary mock compiler).
     External {
         /// Path to the COBOL compiler binary.
@@ -27,8 +51,8 @@ pub enum CompilerBackend {
         cobcrun_bin: Option<PathBuf>,
         /// CLI flag convention spoken by `compiler_bin`.
         flavor: DriverFlavor,
-        /// Whether `ExpectedDiagnostic::message_pattern` regexes must match verbatim.
-        strict_diagnostic_text: bool,
+        /// Policy governing whether `ExpectedDiagnostic::message_pattern` regexes must match verbatim.
+        diagnostic_policy: DiagnosticMessagePolicy,
         /// Timeout in milliseconds per compiler invocation.
         compile_timeout_ms: u64,
     },
@@ -41,8 +65,8 @@ pub struct RunnerConfig {
     pub backend: CompilerBackend,
     /// Root directory under which per-test temporary sandboxes are created.
     pub sandbox_root: PathBuf,
-    /// Keep sandbox directory on disk when a test ends in [`TestOutcome::Fail`].
-    pub preserve_on_failure: bool,
+    /// Sandbox directory cleanup policy after test completion.
+    pub sandbox_retention: SandboxRetention,
     /// Host C compiler path/name used for [`TestStep::CompileC`] steps.
     pub c_compiler: PathBuf,
     /// Host/target capability set used to evaluate `required_capabilities`.
@@ -79,6 +103,9 @@ enum RawStepDisposition {
     HardCrashOrTimeout(String),
 }
 
+/// Hard upper bound on concurrent runner worker threads to prevent host memory exhaustion.
+pub const MAX_RUNNER_JOBS: usize = 16;
+
 /// Executes a slice of [`TestManifest`] items across `config.jobs` parallel worker threads.
 ///
 /// # Arguments
@@ -98,7 +125,7 @@ pub fn execute_suite_parallel(
         return Ok(Vec::new());
     }
 
-    let worker_count = config.jobs.max(1).min(manifests.len());
+    let worker_count = config.jobs.clamp(1, MAX_RUNNER_JOBS).min(manifests.len());
     let next_idx = AtomicUsize::new(0);
     let mut buckets: Vec<Vec<(usize, Result<TestExecutionRecord>)>> =
         (0..worker_count).map(|_| Vec::new()).collect();
@@ -106,15 +133,15 @@ pub fn execute_suite_parallel(
     std::thread::scope(|scope| {
         for bucket in &mut buckets {
             let idx_ref = &next_idx;
-            scope.spawn(move || {
-                loop {
-                    let i = idx_ref.fetch_add(1, Ordering::Relaxed);
-                    if i >= manifests.len() {
-                        break;
+            let _ = std::thread::Builder::new()
+                .stack_size(32 * 1024 * 1024)
+                .spawn_scoped(scope, move || {
+                    let mut i = idx_ref.fetch_add(1, Ordering::Relaxed);
+                    while let Some(manifest) = manifests.get(i) {
+                        bucket.push((i, execute_single_test(manifest, config, i)));
+                        i = idx_ref.fetch_add(1, Ordering::Relaxed);
                     }
-                    bucket.push((i, execute_single_test(&manifests[i], config, i)));
-                }
-            });
+                });
         }
     });
 
@@ -186,9 +213,15 @@ pub fn execute_single_test(
     std::fs::create_dir_all(&sandbox)?;
 
     let disposition = run_torture_iterations(manifest, config, &sandbox)?;
-    let (outcome, detail) = classify_disposition(disposition, manifest.xfail_reason.as_deref());
+    let (outcome, detail) = classify_disposition(
+        disposition,
+        manifest.xfail_reason.as_deref(),
+        &config.backend,
+    );
 
-    if !(outcome == TestOutcome::Fail && config.preserve_on_failure) {
+    if !(outcome == TestOutcome::Fail
+        && config.sandbox_retention == SandboxRetention::PreserveOnFailure)
+    {
         let _ = std::fs::remove_dir_all(&sandbox);
     }
 
@@ -201,22 +234,30 @@ pub fn execute_single_test(
     })
 }
 
-/// Maps [`RawStepDisposition`] and optional `xfail_reason` to final `(TestOutcome, detail)`.
+/// Maps [`RawStepDisposition`], optional `xfail_reason`, and [`CompilerBackend`] to final `(TestOutcome, detail)`.
 ///
 /// # Arguments
 ///
 /// * `disp` - Raw pipeline execution disposition.
 /// * `xfail_reason` - Static `XFAIL` annotation on the test manifest, if present.
+/// * `backend` - Active [`CompilerBackend`] (`InProcessCompiler` / `CoblangCompiled` use incremental baseline ratcheting).
 #[must_use]
 fn classify_disposition(
     disp: RawStepDisposition,
     xfail_reason: Option<&str>,
+    backend: &CompilerBackend,
 ) -> (TestOutcome, String) {
+    let incremental = matches!(
+        backend,
+        CompilerBackend::InProcessCompiler | CompilerBackend::CoblangCompiled { .. }
+    );
     match disp {
         RawStepDisposition::HardCrashOrTimeout(msg) => (TestOutcome::Fail, msg),
         RawStepDisposition::Unimplemented(msg) => (TestOutcome::XFail, msg),
         RawStepDisposition::Passed => {
-            if let Some(reason) = xfail_reason {
+            if incremental {
+                (TestOutcome::Pass, String::new())
+            } else if let Some(reason) = xfail_reason {
                 (TestOutcome::XPass, format!("unexpected pass ({reason})"))
             } else {
                 (TestOutcome::Pass, String::new())
@@ -225,6 +266,8 @@ fn classify_disposition(
         RawStepDisposition::AssertionFailed(msg) => {
             if let Some(reason) = xfail_reason {
                 (TestOutcome::XFail, format!("{reason}: {msg}"))
+            } else if incremental {
+                (TestOutcome::XFail, msg)
             } else {
                 (TestOutcome::Fail, msg)
             }
@@ -327,7 +370,15 @@ fn execute_step(
         TestStep::CompileCobol(cb) => {
             execute_cobol_compile(cb, opt_override, &manifest.id, &config.backend, sandbox)
         }
-        TestStep::RunBinary(rb) => execute_run_binary(rb, &manifest.id, &config.backend, sandbox),
+        TestStep::RunBinary(rb) => execute_run_binary(
+            rb,
+            &manifest.id,
+            &config.backend,
+            sandbox,
+            manifest
+                .required_capabilities
+                .contains(&coblang_common::Capability::CursesPty),
+        ),
     }
 }
 
@@ -368,10 +419,59 @@ fn execute_cobol_compile(
                 String::from_utf8_lossy(&err).trim()
             )))
         }
+        CompilerBackend::InProcessCompiler => {
+            let args = build_driver_cli_args(DriverFlavor::Coblang, spec, opt);
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let code = execute_compiler_driver(
+                DriverFlavor::Coblang,
+                &args,
+                &spec.env,
+                sandbox,
+                &mut out,
+                &mut err,
+            );
+            let proc_out = ProcessOutput {
+                exit_code: Some(i32::from(code)),
+                signal: None,
+                timed_out: false,
+                stdout: out,
+                stderr: err,
+            };
+            evaluate_external_compile(
+                spec,
+                &proc_out,
+                DiagnosticMessagePolicy::IgnoreMessagePattern,
+            )
+        }
+        CompilerBackend::CoblangCompiled {
+            compiler_bin,
+            compile_timeout_ms,
+            ..
+        } => {
+            let args = build_driver_cli_args(DriverFlavor::Coblang, spec, opt);
+            let proc_out = run_command_with_timeout(
+                &CommandSpec {
+                    program: compiler_bin,
+                    args: &args,
+                    cwd: sandbox,
+                    env: &spec.env,
+                    stdin_bytes: &[],
+                    timeout_ms: *compile_timeout_ms,
+                    use_pty: false,
+                },
+                test_id,
+            )?;
+            evaluate_external_compile(
+                spec,
+                &proc_out,
+                DiagnosticMessagePolicy::IgnoreMessagePattern,
+            )
+        }
         CompilerBackend::External {
             compiler_bin,
             flavor,
-            strict_diagnostic_text,
+            diagnostic_policy,
             compile_timeout_ms,
             ..
         } => {
@@ -384,10 +484,11 @@ fn execute_cobol_compile(
                     env: &spec.env,
                     stdin_bytes: &[],
                     timeout_ms: *compile_timeout_ms,
+                    use_pty: false,
                 },
                 test_id,
             )?;
-            evaluate_external_compile(spec, &proc_out, *strict_diagnostic_text)
+            evaluate_external_compile(spec, &proc_out, *diagnostic_policy)
         }
     }
 }
@@ -398,7 +499,7 @@ fn execute_cobol_compile(
 ///
 /// * `spec` - Expected compilation outcome and diagnostics.
 /// * `proc_out` - Captured compiler process output.
-/// * `strict_diag` - Whether diagnostic regexes must match verbatim.
+/// * `diagnostic_policy` - Policy governing diagnostic message regex enforcement.
 ///
 /// # Errors
 ///
@@ -406,7 +507,7 @@ fn execute_cobol_compile(
 fn evaluate_external_compile(
     spec: &CompileCobolSpec,
     proc_out: &ProcessOutput,
-    strict_diag: bool,
+    diagnostic_policy: DiagnosticMessagePolicy,
 ) -> Result<RawStepDisposition> {
     if proc_out.timed_out {
         return Ok(RawStepDisposition::HardCrashOrTimeout(String::from(
@@ -434,8 +535,8 @@ fn evaluate_external_compile(
         &spec.expected_diagnostics,
         &spec.bogus_patterns,
         &spec.prune_patterns,
-        spec.allow_excess_errors,
-        strict_diag,
+        ExcessErrorPolicy::from_allow_flag(spec.allow_excess_errors),
+        diagnostic_policy,
     )? {
         return Ok(RawStepDisposition::AssertionFailed(diag_err));
     }
@@ -588,6 +689,7 @@ fn append_dialect_and_encoding_args(
 /// * `test_id` - Test identifier.
 /// * `backend` - Active compiler backend (providing `cobcrun` when `via_cobcrun` is `true`).
 /// * `sandbox` - Sandbox directory.
+/// * `use_pty` - Whether to attach child `stdin`/`stdout` to a POSIX PTY (`Capability::CursesPty`).
 ///
 /// # Errors
 ///
@@ -597,10 +699,9 @@ fn execute_run_binary(
     test_id: &str,
     backend: &CompilerBackend,
     sandbox: &Path,
+    use_pty: bool,
 ) -> Result<RawStepDisposition> {
-    if spec.via_cobcrun
-        && let CompilerBackend::InProcessScaffold = backend
-    {
+    if spec.via_cobcrun && matches!(backend, CompilerBackend::InProcessScaffold) {
         let mut cr_args = vec![spec.target.clone()];
         cr_args.extend(spec.args.iter().cloned());
         let mut out = Vec::new();
@@ -613,6 +714,12 @@ fn execute_run_binary(
     }
 
     let (program, full_args) = resolve_run_command(spec, backend, sandbox);
+    if !spec.via_cobcrun && !program.is_file() {
+        return Ok(RawStepDisposition::AssertionFailed(format!(
+            "target binary `{}` was not created",
+            spec.target
+        )));
+    }
     let proc_out = run_command_with_timeout(
         &CommandSpec {
             program: &program,
@@ -621,6 +728,7 @@ fn execute_run_binary(
             env: &spec.env,
             stdin_bytes: &spec.stdin,
             timeout_ms: spec.timeout_ms,
+            use_pty,
         },
         test_id,
     )?;
@@ -635,6 +743,17 @@ fn execute_run_binary(
         return Ok(RawStepDisposition::HardCrashOrTimeout(format!(
             "program crashed with signal {sig}"
         )));
+    }
+    if spec.via_cobcrun
+        && matches!(
+            backend,
+            CompilerBackend::CoblangCompiled { .. } | CompilerBackend::InProcessCompiler
+        )
+        && proc_out.exit_code == Some(i32::from(EXIT_UNIMPLEMENTED))
+    {
+        return Ok(RawStepDisposition::Unimplemented(
+            String::from_utf8_lossy(&proc_out.stderr).trim().to_string(),
+        ));
     }
     if proc_out.exit_code != Some(spec.expected_exit_code) {
         return Ok(RawStepDisposition::AssertionFailed(format!(
@@ -655,6 +774,30 @@ fn execute_run_binary(
     verify_expected_files(&spec.expected_files, sandbox)
 }
 
+/// Locates the sibling `cobcrun-shim` binary next to `exe_path` (or its parent when running from `deps/`).
+///
+/// # Arguments
+///
+/// * `exe_path` - Optional path to the currently running test/runner executable.
+#[must_use]
+pub fn locate_cobcrun_shim(exe_path: Option<&Path>) -> PathBuf {
+    if let Some(exe) = exe_path
+        && let Some(dir) = exe.parent()
+    {
+        let direct = dir.join("cobcrun-shim");
+        if direct.is_file() {
+            return direct;
+        }
+        if let Some(parent_dir) = dir.parent() {
+            let up = parent_dir.join("cobcrun-shim");
+            if up.is_file() {
+                return up;
+            }
+        }
+    }
+    PathBuf::from("cobcrun-shim")
+}
+
 /// Resolves executable path and arguments for direct binary vs `cobcrun` module execution.
 ///
 /// # Arguments
@@ -670,6 +813,10 @@ fn resolve_run_command(
 ) -> (PathBuf, Vec<String>) {
     if spec.via_cobcrun {
         let bin = match backend {
+            CompilerBackend::CoblangCompiled { cobcrun_bin, .. } => cobcrun_bin.clone(),
+            CompilerBackend::InProcessCompiler => {
+                locate_cobcrun_shim(std::env::current_exe().ok().as_deref())
+            }
             CompilerBackend::External {
                 cobcrun_bin: Some(p),
                 ..

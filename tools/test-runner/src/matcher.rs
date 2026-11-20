@@ -99,19 +99,56 @@ pub fn parse_single_diagnostic_line(line: &str) -> Option<ParsedDiagnostic> {
 #[must_use]
 fn parse_file_line_prefix(prefix: &str) -> (String, Option<u32>) {
     let parts: Vec<&str> = prefix.rsplitn(3, ':').collect();
-    if parts.len() == 3
-        && parts[0].chars().all(|c| c.is_ascii_digit())
-        && let Ok(ln) = parts[1].trim().parse::<u32>()
+    if let &[p0, p1, p2] = parts.as_slice()
+        && p0.chars().all(|c| c.is_ascii_digit())
+        && let Ok(ln) = p1.trim().parse::<u32>()
     {
-        return (String::from(parts[2]), Some(ln));
+        return (String::from(p2), Some(ln));
     }
-    if parts.len() >= 2
-        && let Ok(ln) = parts[0].trim().parse::<u32>()
+    if let &[p0, _, ..] = parts.as_slice()
+        && let Ok(ln) = p0.trim().parse::<u32>()
     {
-        let head = prefix[..prefix.len() - parts[0].len() - 1].to_string();
+        let head = prefix
+            .get(..prefix.len().saturating_sub(p0.len() + 1))
+            .unwrap_or("")
+            .to_string();
         return (head, Some(ln));
     }
     (String::from(prefix), None)
+}
+
+/// Policy controlling whether unmatched compiler errors fail diagnostic verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExcessErrorPolicy {
+    /// Reject any unmatched error diagnostic (`default`).
+    ForbidExcessErrors,
+    /// Allow unmatched error diagnostics (`dg-excess-errors`).
+    AllowExcessErrors,
+}
+
+impl ExcessErrorPolicy {
+    /// Converts a manifest `allow_excess_errors` field into an [`ExcessErrorPolicy`].
+    ///
+    /// # Arguments
+    ///
+    /// * `allow_excess_errors` - Manifest excess-error flag.
+    #[must_use]
+    pub const fn from_allow_flag(allow_excess_errors: bool) -> Self {
+        if allow_excess_errors {
+            Self::AllowExcessErrors
+        } else {
+            Self::ForbidExcessErrors
+        }
+    }
+}
+
+/// Policy controlling whether `ExpectedDiagnostic::message_pattern` regexes are enforced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticMessagePolicy {
+    /// Match diagnostics by severity, file, and line without requiring wording regex parity.
+    IgnoreMessagePattern,
+    /// Require `ExpectedDiagnostic::message_pattern` to match the diagnostic message text.
+    VerifyMessagePattern,
 }
 
 /// Validates compiler output against expected diagnostics, bogus patterns, and excess-error rules.
@@ -122,8 +159,8 @@ fn parse_file_line_prefix(prefix: &str) -> (String, Option<u32>) {
 /// * `expected` - Expected diagnostic assertions from the test manifest.
 /// * `bogus_patterns` - Forbidden regex patterns (`dg-bogus`).
 /// * `prune_patterns` - Pruned output regex patterns (`dg-prune-output`).
-/// * `allow_excess_errors` - Whether extra unmatched errors are permitted (`dg-excess-errors`).
-/// * `strict_message_match` - Whether diagnostic text must also match `message_pattern`.
+/// * `excess_policy` - Policy governing unmatched compiler error diagnostics.
+/// * `message_policy` - Policy governing diagnostic message regex enforcement.
 ///
 /// # Errors
 ///
@@ -133,8 +170,8 @@ pub fn verify_compile_diagnostics(
     expected: &[ExpectedDiagnostic],
     bogus_patterns: &[String],
     prune_patterns: &[String],
-    allow_excess_errors: bool,
-    strict_message_match: bool,
+    excess_policy: ExcessErrorPolicy,
+    message_policy: DiagnosticMessagePolicy,
 ) -> Result<Option<String>> {
     for bogus in bogus_patterns {
         let re = compile_regex(bogus)?;
@@ -149,15 +186,16 @@ pub fn verify_compile_diagnostics(
     let mut used = vec![false; actual.len()];
 
     for exp in expected {
-        let msg_re = if strict_message_match && !exp.message_pattern.is_empty() {
+        let msg_re = if message_policy == DiagnosticMessagePolicy::VerifyMessagePattern
+            && !exp.message_pattern.is_empty()
+        {
             Some(compile_regex(&exp.message_pattern)?)
         } else {
             None
         };
-        let found = actual
-            .iter()
-            .enumerate()
-            .position(|(idx, act)| !used[idx] && diagnostic_matches(exp, act, msg_re.as_ref()));
+        let found = actual.iter().enumerate().position(|(idx, act)| {
+            !used.get(idx).copied().unwrap_or(true) && diagnostic_matches(exp, act, msg_re.as_ref())
+        });
         let Some(hit) = found else {
             return Ok(Some(format!(
                 "missing expected {} at {}:{:?} (`{}`)",
@@ -167,12 +205,13 @@ pub fn verify_compile_diagnostics(
                 exp.message_pattern
             )));
         };
-        used[hit] = true;
+        used.get_mut(hit).into_iter().for_each(|u| *u = true);
     }
 
-    if !allow_excess_errors {
+    if excess_policy == ExcessErrorPolicy::ForbidExcessErrors {
         for (idx, act) in actual.iter().enumerate() {
-            if !used[idx] && act.severity == DiagnosticSeverity::Error {
+            if !used.get(idx).copied().unwrap_or(true) && act.severity == DiagnosticSeverity::Error
+            {
                 return Ok(Some(format!(
                     "unexpected excess error at {}:{:?}: {}",
                     act.file, act.line, act.message
@@ -200,7 +239,8 @@ fn diagnostic_matches(
     if exp.severity != act.severity {
         return false;
     }
-    if !exp.file.is_empty() && !act.file.ends_with(&exp.file) {
+    let clean_exp_file = exp.file.trim_start_matches('[');
+    if !clean_exp_file.is_empty() && !act.file.ends_with(clean_exp_file) {
         return false;
     }
     if exp.line.is_some() && exp.line != act.line {
@@ -246,7 +286,8 @@ pub fn verify_output(matcher: &OutputMatcher, actual_bytes: &[u8]) -> Result<Opt
         }
         OutputMatcher::Regex(pattern) => {
             let re = compile_regex(pattern)?;
-            if re.is_match(&actual) {
+            let actual_dejagnu = actual.replace('\u{0000}', "");
+            if re.is_match(&actual_dejagnu) {
                 Ok(None)
             } else {
                 Ok(Some(format!("output did not match regex `{pattern}`")))
@@ -307,45 +348,49 @@ pub fn verify_ccvs85_report(
     expected_deleted: u32,
     expected_inspect: u32,
 ) -> Option<String> {
-    let (mut pass, mut fail, mut deleted, mut inspect) = (0_u32, 0_u32, 0_u32, 0_u32);
+    let (mut f_pass, mut f_fail, mut f_deleted, mut f_inspect) = (0_u32, 0_u32, 0_u32, 0_u32);
+    let (mut d_pass, mut d_fail, mut d_deleted, mut d_inspect) = (0_u32, 0_u32, 0_u32, 0_u32);
     let mut saw_summary_footer = false;
 
     for line in report.lines() {
         let trimmed = line.trim();
         let toks: Vec<&str> = trimmed.split_whitespace().collect();
-        if toks.len() >= 5 && toks[1] == "OF" && toks[3] == "TESTS" && toks[4] == "WERE" {
-            if let Ok(n) = toks[0].parse::<u32>() {
-                pass += n;
+        if let &[t0, "OF", _, "TESTS", "WERE", ..] = toks.as_slice() {
+            if let Ok(n) = t0.parse::<u32>() {
+                f_pass += n;
                 saw_summary_footer = true;
             }
-        } else if toks.len() >= 3 && toks[1] == "TEST(S)" {
-            let num = toks[0].parse::<u32>().unwrap_or(0);
-            match toks[2] {
-                "FAILED" => fail += num,
-                "DELETED" => deleted += num,
-                "REQUIRE" => inspect += num,
+        } else if let &[t0, "TEST(S)", t2, ..] = toks.as_slice() {
+            let num = t0.parse::<u32>().unwrap_or(0);
+            match t2 {
+                "FAILED" => f_fail += num,
+                "DELETED" => f_deleted += num,
+                "REQUIRE" => f_inspect += num,
                 _ => {}
             }
             saw_summary_footer = true;
-        } else if toks.len() >= 5
-            && toks[1] == "TESTS"
-            && toks[2] == "REQUIRE"
-            && toks[3] == "VISUAL"
-        {
-            if let Ok(n) = toks[0].parse::<u32>() {
-                inspect += n;
+        } else if let &[t0, "TESTS", "REQUIRE", "VISUAL", ..] = toks.as_slice() {
+            if let Ok(n) = t0.parse::<u32>() {
+                f_inspect += n;
                 saw_summary_footer = true;
             }
         } else if !saw_summary_footer {
             accumulate_ccvs85_detail_line(
                 trimmed,
-                &mut pass,
-                &mut fail,
-                &mut deleted,
-                &mut inspect,
+                &mut d_pass,
+                &mut d_fail,
+                &mut d_deleted,
+                &mut d_inspect,
             );
         }
     }
+
+    let fail = f_fail.max(d_fail);
+    let (pass, deleted, inspect) = if saw_summary_footer {
+        (f_pass, f_deleted, f_inspect)
+    } else {
+        (d_pass, d_deleted, d_inspect)
+    };
 
     if fail > 0 {
         return Some(format!("CCVS-85 report contained {fail} *FAIL* subtest(s)"));
@@ -374,7 +419,7 @@ fn accumulate_ccvs85_detail_line(
     deleted: &mut u32,
     inspect: &mut u32,
 ) {
-    if trimmed.contains("*FAIL*") {
+    if trimmed.contains("*FAIL*") || trimmed.contains("FAIL*") {
         *fail += 1;
     } else if trimmed.starts_with("PASS ") || trimmed.ends_with(" PASS") {
         *pass += 1;

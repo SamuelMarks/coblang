@@ -1,0 +1,13 @@
+[package]
+name = "coblang-isam"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Clean-room pure-Rust 4096-byte CRC32 paged Order-B B+Tree INDEXED (ISAM) file engine."
+
+[dependencies]
+coblang-common.workspace = true
+
+[lints]
+workspace = true

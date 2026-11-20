@@ -1,0 +1,245 @@
+//! Comprehensive Sema unit & negative-diagnostic tests for `coblang_sema::m14_fileio` (`M14`–`M16`).
+
+use std::path::Path;
+
+use coblang_common::{Dialect, Result, SourceFormat};
+use coblang_diag::{DiagnosticSink, DialectConfig, SourceMap, SymbolInterner, WarningPolicy};
+use coblang_hir::{HirModule, ResolvedHirModule};
+use coblang_pp::{
+    DebugLinePolicy, InMemoryCopybookResolver, PreprocessConfig, preprocess_source_file,
+};
+use coblang_sema::lower_compilation_group;
+use coblang_syntax::parse_preprocessed_unit;
+
+/// Runs preprocess + parse + sema on `src`, returning `(Result<ResolvedHirModule>, DiagnosticSink)`.
+fn sema_check(src: &str, dialect: Dialect) -> Result<(Result<ResolvedHirModule>, DiagnosticSink)> {
+    let dcfg = DialectConfig::for_dialect(dialect);
+    let mem = InMemoryCopybookResolver::new();
+    let pp_cfg = PreprocessConfig {
+        initial_format: SourceFormat::Free,
+        dialect_config: &dcfg,
+        debug_policy: DebugLinePolicy::StripDebugLines,
+        initial_defines: &[],
+        copybook_resolver: &mem,
+    };
+    let mut sm = SourceMap::new();
+    let mut interner = SymbolInterner::new();
+    let mut sink = DiagnosticSink::new(WarningPolicy::new(), 100);
+    let unit = preprocess_source_file("m14.cob", Path::new("."), src, &pp_cfg, &mut sm, &mut sink)?;
+    let group = parse_preprocessed_unit(&unit, &dcfg, &mut interner, &mut sink)?;
+    let res = lower_compilation_group(&group, &dcfg, &mut interner, &mut sink);
+    Ok((res, sink))
+}
+
+/// Verifies positive resolution of all File I/O, ISAM, `LINAGE`, `SAME RECORD AREA`, `GLOBAL`/`EXTERNAL`, and `SORT`/`MERGE` clauses.
+#[test]
+fn m14_m16_positive_clauses_and_global_inheritance() -> Result<()> {
+    let src = "
+IDENTIFICATION DIVISION.
+PROGRAM-ID. M14-MAIN.
+ENVIRONMENT DIVISION.
+CONFIGURATION SECTION.
+OBJECT-COMPUTER. DEV-BOX PROGRAM COLLATING SEQUENCE IS REV-ALPHA.
+SPECIAL-NAMES.
+    ALPHABET REV-ALPHA IS 'Z' THRU 'A'
+    C01 IS TOP-CH
+    CSP IS NO-SPACE-CH.
+INPUT-OUTPUT SECTION.
+FILE-CONTROL.
+    SELECT OPTIONAL F-SEQ ASSIGN TO PRINTER 'seq.prt'
+        ORGANIZATION IS SEQUENTIAL
+        PADDING CHARACTER IS ZERO
+        FILE STATUS IS WS-ST WS-ST2.
+    SELECT F-LS ASSIGN TO DISK
+        ORGANIZATION IS LINE SEQUENTIAL
+        SHARING WITH ALL OTHER
+        LOCK MODE IS AUTOMATIC.
+    SELECT F-REL ASSIGN TO DYNAMIC WS-DYN-PATH
+        ORGANIZATION IS RELATIVE
+        ACCESS MODE IS DYNAMIC
+        RELATIVE F-REL-KEY
+        LOCK MODE IS MANUAL
+        SHARING WITH READ ONLY
+        FILE STATUS IS WS-ST.
+    SELECT F-IDX ASSIGN TO EXTERNAL DD_IDX
+        ORGANIZATION IS INDEXED
+        ACCESS MODE IS DYNAMIC
+        RECORD KEY IS IDX-PK
+        ALTERNATE RECORD KEY IS IDX-AK1 = IDX-SEG1 IDX-SEG2 WITH DUPLICATES SUPPRESS WHEN ALL '*'
+        ALTERNATE RECORD KEY IS IDX-AK2 SOURCE IS IDX-SEG2, IDX-SEG1 SUPPRESS WHEN 'N/A'
+        ALTERNATE RECORD KEY IS IDX-AK3 SUPPRESS WHEN SPACES
+        COLLATING SEQUENCE IS REV-ALPHA
+        LOCK MODE IS EXCLUSIVE
+        SHARING WITH NO OTHER
+        FILE STATUS IS WS-ST.
+    SELECT F-DISP ASSIGN TO DISPLAY.
+    SELECT F-KBD ASSIGN TO KEYBOARD.
+    SELECT SD-WORK.
+I-O-CONTROL.
+    SAME RECORD AREA FOR F-SEQ F-LS.
+    SAME SORT AREA FOR SD-WORK F-SEQ.
+DATA DIVISION.
+FILE SECTION.
+FD F-SEQ IS GLOBAL
+    RECORD CONTAINS 10 TO 40 CHARACTERS DEPENDING ON WS-DEP
+    LINAGE IS WS-BODY LINES WITH FOOTING AT 18 LINES AT TOP 2 LINES AT BOTTOM WS-BOT.
+01 SEQ-R1 PIC X(10).
+01 SEQ-R2 PIC X(40).
+FD F-LS IS EXTERNAL
+    RECORD CONTAINS 20 CHARACTERS.
+01 LS-REC.
+   05 LS-CNT PIC 99.
+   05 LS-ITEM PIC X OCCURS 1 TO 10 TIMES DEPENDING ON LS-CNT.
+FD F-REL
+    RECORD IS VARYING IN SIZE FROM 8 TO 16 CHARACTERS.
+01 REL-REC PIC X(16).
+FD F-IDX.
+01 IDX-REC.
+   05 IDX-PK PIC X(4).
+   05 IDX-SEG1 PIC X(2).
+   05 IDX-SEG2 PIC X(3).
+   05 IDX-AK3 PIC X(3).
+FD F-DISP.
+01 DISP-REC PIC X(8).
+FD F-KBD.
+01 KBD-REC PIC X(8).
+SD SD-WORK.
+01 SD-REC.
+   05 SD-K1 PIC 9(4).
+   05 SD-K2 PIC X(4).
+WORKING-STORAGE SECTION.
+01 WS-ST PIC XX.
+01 WS-ST2 PIC X(4).
+01 WS-DYN-PATH PIC X(32) VALUE 'rel.dat'.
+01 F-REL-KEY PIC 9(4) VALUE 1.
+01 WS-DEP PIC 99 VALUE 10.
+01 WS-BODY PIC 99 VALUE 20.
+01 WS-BOT PIC 99 VALUE 2.
+01 WS-BUF PIC X(40).
+PROCEDURE DIVISION.
+DECLARATIVES.
+DECL-FILE SECTION.
+    USE GLOBAL AFTER STANDARD ERROR PROCEDURE ON F-SEQ.
+    CONTINUE.
+DECL-IN SECTION.
+    USE AFTER EXCEPTION PROCEDURE INPUT.
+    CONTINUE.
+DECL-OUT SECTION.
+    USE AFTER ERROR PROCEDURE OUTPUT.
+    CONTINUE.
+DECL-IO SECTION.
+    USE AFTER ERROR PROCEDURE ON I-O.
+    CONTINUE.
+DECL-EXT SECTION.
+    USE AFTER ERROR PROCEDURE ON EXTEND.
+    CONTINUE.
+END DECLARATIVES.
+MAIN-SEC SECTION.
+P-START.
+    OPEN INPUT F-LS WITH NO REWIND
+         OUTPUT F-SEQ WITH LOCK
+         I-O F-IDX SHARING WITH ALL OTHER
+         EXTEND F-DISP SHARING WITH NO OTHER.
+    WRITE SEQ-R1 FROM WS-BUF AFTER ADVANCING TOP-CH AT END-OF-PAGE CONTINUE NOT AT END-OF-PAGE CONTINUE END-WRITE.
+    WRITE SEQ-R2 BEFORE ADVANCING NO-SPACE-CH.
+    WRITE SEQ-R1 AFTER ADVANCING PAGE.
+    WRITE SEQ-R1 BEFORE ADVANCING 2 LINES.
+    WRITE FILE F-IDX FROM IDX-REC INVALID KEY CONTINUE NOT INVALID KEY CONTINUE END-WRITE.
+    REWRITE FILE F-IDX FROM IDX-REC INVALID KEY CONTINUE END-REWRITE.
+    READ F-IDX NEXT INTO WS-BUF WITH LOCK AT END CONTINUE NOT AT END CONTINUE END-READ.
+    READ F-IDX PREVIOUS WITH KEPT LOCK AT END CONTINUE END-READ.
+    READ F-IDX KEY IS IDX-AK1 WITH NO LOCK INVALID KEY CONTINUE END-READ.
+    READ F-IDX IGNORING LOCK INVALID KEY CONTINUE END-READ.
+    START F-IDX FIRST INVALID KEY CONTINUE END-START.
+    START F-IDX LAST INVALID KEY CONTINUE END-START.
+    START F-IDX KEY >= IDX-PK WITH SIZE 2 INVALID KEY CONTINUE END-START.
+    START F-IDX KEY > IDX-SEG1 INVALID KEY CONTINUE END-START.
+    START F-IDX KEY < IDX-PK INVALID KEY CONTINUE END-START.
+    START F-IDX KEY <= IDX-PK INVALID KEY CONTINUE END-START.
+    DELETE F-IDX RECORD INVALID KEY CONTINUE NOT INVALID KEY CONTINUE END-DELETE.
+    UNLOCK F-IDX.
+    CLOSE F-SEQ WITH NO REWIND F-LS REEL FOR REMOVAL F-IDX WITH LOCK F-DISP.
+    DELETE FILE F-REL F-LS ON EXCEPTION CONTINUE NOT ON EXCEPTION CONTINUE END-DELETE.
+    SORT SD-WORK ON ASCENDING KEY SD-K1 DESCENDING SD-K2
+        WITH DUPLICATES IN ORDER
+        SEQUENCE REV-ALPHA
+        INPUT PROCEDURE IS IN-PROC
+        OUTPUT PROCEDURE IS OUT-PROC.
+    SORT SD-WORK ON ASCENDING SD-K1 USING F-LS GIVING F-DISP.
+    MERGE SD-WORK ON ASCENDING SD-K1 USING F-LS F-DISP GIVING F-SEQ.
+    CALL 'M14-CHILD'.
+    STOP RUN.
+IN-PROC.
+    RELEASE SD-REC FROM WS-BUF.
+OUT-PROC.
+    RETURN SD-WORK RECORD INTO WS-BUF AT END CONTINUE NOT AT END CONTINUE END-RETURN.
+
+IDENTIFICATION DIVISION.
+PROGRAM-ID. M14-CHILD.
+PROCEDURE DIVISION.
+    OPEN OUTPUT F-SEQ.
+    WRITE SEQ-R1.
+    CLOSE F-SEQ.
+    GOBACK.
+END PROGRAM M14-CHILD.
+END PROGRAM M14-MAIN.
+";
+    let (res, sink) = sema_check(src, Dialect::Default)?;
+    assert!(
+        !sink.has_errors(),
+        "unexpected diagnostics: {:?}",
+        sink.diagnostics()
+    );
+    let HirModule { programs, .. } = res?.0;
+    assert_eq!(programs.len(), 1);
+    assert_eq!(programs.first().map(|p| p.nested.len()), Some(1));
+    Ok(())
+}
+
+/// Verifies semantic error diagnostics on invalid File I/O / ISAM / `START` / `WRITE` constructs.
+#[test]
+fn m14_negative_sema_diagnostics() -> Result<()> {
+    let bad_src = "
+IDENTIFICATION DIVISION.
+PROGRAM-ID. BAD-FILES.
+ENVIRONMENT DIVISION.
+INPUT-OUTPUT SECTION.
+FILE-CONTROL.
+    SELECT F-NO-ASSIGN.
+    SELECT F-DUP ASSIGN TO 'a.dat'.
+    SELECT F-DUP ASSIGN TO 'b.dat'
+        ORGANIZATION IS SEQUENTIAL
+        ORGANIZATION IS RELATIVE.
+    SELECT F-BAD-IDX ASSIGN TO 'i.dat'
+        ORGANIZATION IS INDEXED.
+    SELECT F-BAD-REL ASSIGN TO 'r.dat'
+        ORGANIZATION IS RELATIVE
+        ACCESS MODE IS RANDOM.
+    SELECT F-MISSING-FD ASSIGN TO 'm.dat'
+        FILE STATUS IS BAD-ST.
+DATA DIVISION.
+FILE SECTION.
+FD F-ORPHAN.
+01 ORPHAN-REC PIC X(4).
+FD F-NO-ASSIGN.
+01 NA-REC PIC X(4).
+FD F-DUP.
+01 DUP-REC PIC X(4).
+FD F-BAD-IDX.
+01 BI-REC PIC X(4).
+FD F-BAD-REL.
+01 BR-REC PIC X(4).
+WORKING-STORAGE SECTION.
+01 BAD-ST PIC X(5).
+01 WS-NOT-FD PIC X(4).
+PROCEDURE DIVISION.
+    OPEN INPUT WS-NOT-FD.
+    WRITE WS-NOT-FD.
+    START F-DUP KEY NOT = WS-NOT-FD.
+    STOP RUN.
+";
+    let (res, sink) = sema_check(bad_src, Dialect::Cobol2023)?;
+    assert!(res.is_err());
+    assert!(sink.has_errors());
+    Ok(())
+}

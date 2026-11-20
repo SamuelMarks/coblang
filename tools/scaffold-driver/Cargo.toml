@@ -27,7 +27,18 @@ name = "gcobol-shim"
 path = "src/bin/gcobol_shim.rs"
 
 [dependencies]
+coblang-codegen.workspace = true
 coblang-common.workspace = true
+coblang-diag.workspace = true
+coblang-dynload.workspace = true
+coblang-hir.workspace = true
+coblang-mlir.workspace = true
+coblang-pp.workspace = true
+coblang-sema.workspace = true
+coblang-syntax.workspace = true
+
+[dev-dependencies]
+coblang-rt-abi.workspace = true
 
 [lints]
 workspace = true

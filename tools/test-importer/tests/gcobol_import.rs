@@ -8,15 +8,17 @@ use coblang_common::{
     encode_manifest_bundle,
 };
 use coblang_test_importer::gcobol::{
-    DgAction, apply_gcobol_options, import_cobol_dg_file, import_gcobol_tree,
+    DgAction, DgOptPin, apply_gcobol_options, import_cobol_dg_file, import_gcobol_tree,
     parse_dejagnu_directives, resolve_dg_line_spec, tokenize_tcl_words,
 };
-use coblang_test_importer::import_and_write_all_ported_suites;
 use coblang_test_importer::taxonomy::{
     infer_feature_tags, link_cross_suite_equivalents, map_dialect_tag, normalize_equivalence_key,
 };
-use coblang_test_runner::capabilities::HostCapabilities;
-use coblang_test_runner::engine::{CompilerBackend, RunnerConfig, execute_suite_parallel};
+use coblang_test_importer::{import_and_write_all_ported_suites, importer_smoke_check};
+use coblang_test_runner::capabilities::{HostCapabilities, IconvProbePolicy};
+use coblang_test_runner::engine::{
+    CompilerBackend, RunnerConfig, SandboxRetention, execute_suite_parallel,
+};
 
 /// Exercises `taxonomy.rs` tag inference and cross-suite equivalence linking.
 #[test]
@@ -97,27 +99,30 @@ MERGE REPORT SECTION SCREEN SECTION XML GENERATE CLASS-ID CBL_OPEN";
         mk("gcobol/solo", SuiteId::Gcobol, "UNIQUE_SOLO_NAME"),
     ];
     link_cross_suite_equivalents(&mut items);
+    let equivs: Vec<Vec<String>> = items.into_iter().map(|m| m.equivalent_tests).collect();
     assert_eq!(
-        items[0].equivalent_tests,
-        vec![String::from("gnucobol/run/001")]
+        equivs,
+        vec![
+            vec![String::from("gnucobol/run/001")],
+            vec![String::from("gcobol/group2/ADD_CORR")],
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        ]
     );
-    assert_eq!(
-        items[1].equivalent_tests,
-        vec![String::from("gcobol/group2/ADD_CORR")]
-    );
-    assert_eq!(items[2].equivalent_tests, Vec::<String>::new());
-    assert_eq!(items[3].equivalent_tests, Vec::<String>::new());
 }
 
 /// Exercises every `DejaGnu` Tcl tokenizer, line resolver, directive, and flag-mapping branch.
 #[test]
 fn dejagnu_parser_and_flag_mapper_coverage() -> Result<()> {
+    assert_eq!(importer_smoke_check("abc")?, 3);
+    assert!(importer_smoke_check("").is_err());
+
     let backslash = '\u{005c}';
     let escaped_tcl = format!(
         r#"dg-error "msg{backslash}n{backslash}r{backslash}t{backslash}"" {{ target {{ *-*-* }} }} .-1  "#
     );
     let words = tokenize_tcl_words(&escaped_tcl, "t.cob", 1)?;
-    assert_eq!(words[0], "dg-error");
+    assert_eq!(words.first().map(String::as_str), Some("dg-error"));
     assert_eq!(
         tokenize_tcl_words("dg-do run", "t.cob", 1)?,
         vec![String::from("dg-do"), String::from("run")]
@@ -195,7 +200,7 @@ fn exercise_all_dg_directives() -> Result<()> {
 { dg-end-multiline-output "" }
 "#;
     let d = parse_dejagnu_directives(src, "dir/full.cob")?;
-    assert!(d.explicit_opt);
+    assert_eq!(d.opt_pin, DgOptPin::Explicit);
     assert!(d.allow_excess_errors);
     assert_eq!(d.timeout_factor, 3);
     assert_eq!(d.additional_sources.len(), 2);
@@ -295,7 +300,8 @@ fn import_full_gcobol_cache_and_synthetic_modes() -> Result<()> {
     assert!(bundles.group2.len() >= 500);
     assert_eq!(bundles.libgcobol.len(), 6);
 
-    let out_dir = root.join("tests/ported/gcobol");
+    let tmp_out = std::env::temp_dir().join(format!("coblang-gcob-out-{}", std::process::id()));
+    let out_dir = tmp_out.join("gcobol");
     std::fs::create_dir_all(&out_dir)?;
     std::fs::write(
         out_dir.join("top_level.bundle"),
@@ -321,10 +327,13 @@ fn import_full_gcobol_cache_and_synthetic_modes() -> Result<()> {
     all.extend(bundles.libgcobol);
     let cfg = RunnerConfig {
         backend: CompilerBackend::InProcessScaffold,
-        sandbox_root: std::env::temp_dir().join("coblang-gcob-dryrun"),
-        preserve_on_failure: false,
+        sandbox_root: tmp_out.join("dryrun-sbx"),
+        sandbox_retention: SandboxRetention::CleanAlways,
         c_compiler: PathBuf::from("clang"),
-        capabilities: HostCapabilities::from_explicit(&[Capability::PosixTools], true),
+        capabilities: HostCapabilities::from_explicit(
+            &[Capability::PosixTools],
+            IconvProbePolicy::ProbeSystemIconv,
+        ),
         jobs: 8,
     };
     let records = execute_suite_parallel(&all, &cfg)?;
@@ -339,10 +348,9 @@ fn import_full_gcobol_cache_and_synthetic_modes() -> Result<()> {
         );
     }
 
-    let full_summary = import_and_write_all_ported_suites(
-        &root.join(".upstream-cache"),
-        &root.join("tests/ported"),
-    )?;
+    let full_summary =
+        import_and_write_all_ported_suites(&root.join(".upstream-cache"), &tmp_out.join("ported"))?;
+    let _ = std::fs::remove_dir_all(&tmp_out);
     assert_eq!(full_summary.total_manifests, 2525);
     assert!(full_summary.linked_equivalents > 0);
     Ok(())

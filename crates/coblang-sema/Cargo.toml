@@ -1,0 +1,20 @@
+[package]
+name = "coblang-sema"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "COBOL symbol resolver, PICTURE bytecode compiler, byte-exact storage layout solver, typechecker, and HIR lowerer."
+
+[dependencies]
+coblang-common.workspace = true
+coblang-decimal.workspace = true
+coblang-diag.workspace = true
+coblang-hir.workspace = true
+coblang-intrinsics.workspace = true
+coblang-pp.workspace = true
+coblang-rt-core.workspace = true
+coblang-syntax.workspace = true
+
+[lints]
+workspace = true

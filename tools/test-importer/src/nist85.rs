@@ -168,28 +168,27 @@ pub fn preprocess_exec85_lines(raw_lines: &[String], prog_id: &str, cfg: &Exec85
 #[must_use]
 fn transform_single_exec85_line(line: &str, cfg: &Exec85Config) -> Option<String> {
     let mut chars: Vec<char> = line.chars().collect();
-    if chars.len() < 7 {
+    let Some(&col7) = chars.get(6) else {
         return Some(String::from(line));
-    }
+    };
 
-    let col7 = chars[6];
     if col7.is_ascii_alphabetic() && col7 != 'D' {
         if matches!(col7, 'A' | 'E' | 'H' | 'L' | 'Y' | 'T') {
-            chars[6] = ' ';
+            chars.get_mut(6).into_iter().for_each(|c| *c = ' ');
         } else if cfg.kill_deletions {
             return None;
         } else {
-            if chars.len() > 7 {
-                chars[7] = col7;
+            if let Some(col8) = chars.get_mut(7) {
+                *col8 = col7;
             }
-            chars[6] = '*';
+            chars.get_mut(6).into_iter().for_each(|c| *c = '*');
             return Some(chars.into_iter().collect());
         }
     }
 
     if chars.len() >= 19 {
-        let tag_12_15: String = chars[11..15].iter().collect();
-        let num_17_19: String = chars[16..19].iter().collect();
+        let tag_12_15: String = chars.get(11..15).unwrap_or(&[]).iter().collect();
+        let num_17_19: String = chars.get(16..19).unwrap_or(&[]).iter().collect();
         if tag_12_15 == "XXXX"
             && let Ok(card_no) = num_17_19.parse::<u16>()
             && let Some(raw_sub) = cfg.x_cards.get(&card_no)
@@ -201,12 +200,8 @@ fn transform_single_exec85_line(line: &str, cfg: &Exec85Config) -> Option<String
             } else if !wants_dot && sub.ends_with('.') {
                 sub.pop();
             }
-            let prefix: String = chars[..11].iter().collect();
-            let suffix: String = if chars.len() > 72 {
-                chars[72..].iter().collect()
-            } else {
-                String::new()
-            };
+            let prefix: String = chars.get(..11).unwrap_or(&[]).iter().collect();
+            let suffix: String = chars.get(72..).unwrap_or(&[]).iter().collect();
             return Some(format!("{prefix}{sub:<61}{suffix}"));
         }
     }
@@ -232,13 +227,13 @@ pub fn parse_module_baseline(text: &str, module_file: &str) -> Result<Vec<NistBa
             continue;
         }
         let cols: Vec<&str> = trimmed.split_whitespace().collect();
-        if cols.len() != 7 {
+        let [filename, total_s, pass_s, _, deleted_s, inspect_s, _] = cols.as_slice() else {
             return Err(CoblangError::ImportParse {
                 source_file: String::from(module_file),
                 line: idx + 1,
                 message: format!("expected 7 columns in baseline row `{trimmed}`"),
             });
-        }
+        };
         let parse_col = |s: &str| -> Result<u32> {
             s.parse::<u32>().map_err(|_| CoblangError::ImportParse {
                 source_file: String::from(module_file),
@@ -247,11 +242,11 @@ pub fn parse_module_baseline(text: &str, module_file: &str) -> Result<Vec<NistBa
             })
         };
         rows.push(NistBaselineEntry {
-            filename: String::from(cols[0]),
-            total: parse_col(cols[1])?,
-            pass: parse_col(cols[2])?,
-            deleted: parse_col(cols[4])?,
-            inspect: parse_col(cols[5])?,
+            filename: String::from(*filename),
+            total: parse_col(total_s)?,
+            pass: parse_col(pass_s)?,
+            deleted: parse_col(deleted_s)?,
+            inspect: parse_col(inspect_s)?,
         });
     }
     Ok(rows)
@@ -299,15 +294,15 @@ pub fn extract_newcob_from_str(text: &str, cfg: &Exec85Config) -> Result<Extract
     let mut idx = 0;
     let mut found_any = false;
 
-    while idx < all_lines.len() {
-        let line = all_lines[idx].trim_end_matches('\u{000d}');
+    while let Some(&raw_line) = all_lines.get(idx) {
+        let line = raw_line.trim_end_matches('\u{000d}');
         if let Some(hdr) = line.strip_prefix("*HEADER,") {
             found_any = true;
             let hdr_line = u32::try_from(idx + 1).unwrap_or(1);
             idx += 1;
             let mut body = Vec::new();
-            while idx < all_lines.len() {
-                let cur = all_lines[idx].trim_end_matches('\u{000d}');
+            while let Some(&raw_cur) = all_lines.get(idx) {
+                let cur = raw_cur.trim_end_matches('\u{000d}');
                 if cur.starts_with("*END") || cur.starts_with("*HEADER,") {
                     break;
                 }
@@ -447,11 +442,24 @@ pub fn build_nist_manifests_from_archive(
         let rows = parse_module_baseline(&base_text, &base_name)?;
         let mut manifests = Vec::with_capacity(rows.len());
         let mut seen_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut prev_cumulative: BTreeMap<String, NistBaselineEntry> = BTreeMap::new();
 
         for row in rows {
             let occ = seen_counts.entry(row.filename.clone()).or_insert(0);
             *occ += 1;
-            let manifest = build_single_nist_manifest(module, &row, *occ, archive)?;
+            let effective_row = if let Some(prev) = prev_cumulative.get(&row.filename) {
+                NistBaselineEntry {
+                    filename: row.filename.clone(),
+                    total: row.total.saturating_sub(prev.total),
+                    pass: row.pass.saturating_sub(prev.pass),
+                    deleted: row.deleted.saturating_sub(prev.deleted),
+                    inspect: row.inspect.saturating_sub(prev.inspect),
+                }
+            } else {
+                row.clone()
+            };
+            prev_cumulative.insert(row.filename.clone(), row);
+            let manifest = build_single_nist_manifest(module, &effective_row, *occ, archive)?;
             manifests.push(manifest);
         }
         by_module.insert(module, manifests);

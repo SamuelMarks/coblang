@@ -113,18 +113,17 @@ pub fn decode_expectations(text: &str) -> Result<BTreeMap<String, ExpectationEnt
             continue;
         }
         let cols: Vec<&str> = raw.splitn(3, TAB).collect();
-        if cols.len() != 3 {
-            return Err(CoblangError::ManifestFormat {
+        let &[c0, c1, c2] =
+            <&[&str; 3]>::try_from(cols.as_slice()).map_err(|_| CoblangError::ManifestFormat {
                 line: line_no,
                 message: String::from("expected 3 tab-separated columns in expectation file"),
-            });
-        }
-        let outcome = TestOutcome::parse_token(cols[1], line_no)?;
+            })?;
+        let outcome = TestOutcome::parse_token(c1, line_no)?;
         map.insert(
-            String::from(cols[0]),
+            String::from(c0),
             ExpectationEntry {
                 outcome,
-                note: String::from(cols[2]),
+                note: String::from(c2),
             },
         );
     }

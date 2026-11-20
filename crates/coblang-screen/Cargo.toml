@@ -1,0 +1,17 @@
+[package]
+name = "coblang-screen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Pure-Rust SCREEN SECTION layout/field editor, VT100/ANSI terminal backend, and deterministic 24x80 virtual grid engine."
+
+[lints]
+workspace = true
+
+[dependencies]
+coblang-common.workspace = true
+coblang-decimal.workspace = true
+coblang-hir.workspace = true
+coblang-pic.workspace = true
+coblang-rt-core.workspace = true

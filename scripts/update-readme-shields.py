@@ -13,11 +13,12 @@ import sys
 from typing import Sequence
 
 FN_RE = re.compile(
-    r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?fn\s+([A-Za-z0-9_]+)\s*(?:<[^>]*>)?\s*\((.*)"
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?(?:extern\s+\"[^\"]*\"\s+)?fn\s+([A-Za-z0-9_]+)\s*(?:<[^>]*>)?\s*\((.*)"
 )
 ITEM_RE = re.compile(
-    r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|trait|type|const|static|macro_rules!)\s+([A-Za-z0-9_]+)"
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|trait|union|type|const|static|macro_rules!)\s+([A-Za-z0-9_]+)"
 )
+INLINE_MOD_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z0-9_]+)\s*\{")
 
 DOC_SHIELD_RE = re.compile(
     r"!\[%? ?doc coverage\]\(https://img\.shields\.io/badge/[^)]*doc(?:%20|_)coverage-[^)]+\)",
@@ -90,6 +91,32 @@ def collect_preceding_docs(lines: Sequence[str], index: int) -> tuple[str, bool]
         elif stripped.startswith("#["):
             if "test" in stripped:
                 has_test_attr = True
+        elif stripped.endswith("]"):
+            m = k - 1
+            attr_chunks = [stripped]
+            found_open = False
+            while m >= 0:
+                prev = lines[m].strip()
+                attr_chunks.append(prev)
+                if prev.startswith("#["):
+                    found_open = True
+                    break
+                if (
+                    prev.startswith("///")
+                    or prev.endswith(";")
+                    or prev.endswith("}")
+                    or prev.endswith("{")
+                ):
+                    break
+                m -= 1
+            if not found_open:
+                break
+            joined_attr = " ".join(reversed(attr_chunks))
+            if joined_attr.startswith("#[doc"):
+                doc_lines.append(joined_attr)
+            elif "test" in joined_attr:
+                has_test_attr = True
+            k = m
         else:
             break
         k -= 1
@@ -162,6 +189,7 @@ def compute_doc_coverage(root: pathlib.Path) -> tuple[int, int, list[str]]:
     """
     rs_files = sorted(
         list(root.glob("src/**/*.rs"))
+        + list(root.glob("crates/**/*.rs"))
         + list(root.glob("tools/**/*.rs"))
         + list(root.glob("tests/**/*.rs"))
     )
@@ -186,11 +214,28 @@ def compute_doc_coverage(root: pathlib.Path) -> tuple[int, int, list[str]]:
                 fn_name = fn_match.group(1)
                 sig_lines = [lines[i]]
                 j = i
-                while ")" not in lines[j] and j + 1 < len(lines):
+                after_fn = lines[i].split(f"fn {fn_name}", 1)[1]
+                while "(" not in after_fn and j + 1 < len(lines):
                     j += 1
                     sig_lines.append(lines[j])
-                sig = " ".join(sig_lines)
-                params_part = sig.split("(", 1)[1].rsplit(")", 1)[0].strip()
+                    after_fn += " " + lines[j]
+                while after_fn.count("(") > after_fn.count(")") and j + 1 < len(lines):
+                    j += 1
+                    sig_lines.append(lines[j])
+                    after_fn += " " + lines[j]
+                params_part = ""
+                if "(" in after_fn:
+                    open_pos = after_fn.index("(")
+                    depth = 0
+                    for idx_ch in range(open_pos, len(after_fn)):
+                        ch = after_fn[idx_ch]
+                        if ch == "(":
+                            depth += 1
+                        elif ch == ")":
+                            depth -= 1
+                            if depth == 0:
+                                params_part = after_fn[open_pos + 1 : idx_ch].strip()
+                                break
 
                 doc_text, has_test_attr = collect_preceding_docs(lines, i)
                 total_units += 1
@@ -216,6 +261,23 @@ def compute_doc_coverage(root: pathlib.Path) -> tuple[int, int, list[str]]:
                                 f"{rel}:{i + 1}: function `{fn_name}` does not document parameter `{arg}`"
                             )
                 i = j + 1
+                continue
+
+            mod_match = INLINE_MOD_RE.match(lines[i])
+            if mod_match:
+                mod_name = mod_match.group(1)
+                doc_text, _ = collect_preceding_docs(lines, i)
+                has_inner = i + 1 < len(lines) and lines[i + 1].strip().startswith(
+                    "//!"
+                )
+                total_units += 1
+                if doc_text or has_inner:
+                    documented_units += 1
+                else:
+                    errors.append(
+                        f"{rel}:{i + 1}: inline module `{mod_name}` is missing `///` or `//!` doc comment"
+                    )
+                i += 1
                 continue
 
             item_match = ITEM_RE.match(lines[i])
@@ -433,6 +495,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     root = pathlib.Path(__file__).resolve().parent.parent
     os.chdir(root)
+    if "MLIR_SYS_200_PREFIX" not in os.environ:
+        for candidate in ("/opt/homebrew/opt/llvm@20", "/usr/lib/llvm-20"):
+            if pathlib.Path(candidate).is_dir():
+                os.environ["MLIR_SYS_200_PREFIX"] = candidate
+                break
+    if "MLIR_SYS_200_PREFIX" in os.environ:
+        os.environ.setdefault("LLVM_SYS_201_PREFIX", os.environ["MLIR_SYS_200_PREFIX"])
+        os.environ.setdefault("TABLEGEN_200_PREFIX", os.environ["MLIR_SYS_200_PREFIX"])
     readme_path = root / args.readme
 
     if args.verify_strict_100:

@@ -2,6 +2,25 @@
 resolver = "2"
 members = [
     ".",
+    "crates/coblang-diag",
+    "crates/coblang-pp",
+    "crates/coblang-syntax",
+    "crates/coblang-hir",
+    "crates/coblang-sema",
+    "crates/coblang-decimal",
+    "crates/coblang-pic",
+    "crates/coblang-intrinsics",
+    "crates/coblang-fileio",
+    "crates/coblang-isam",
+    "crates/coblang-report",
+    "crates/coblang-mlir",
+    "crates/coblang-codegen",
+    "crates/coblang-rt-core",
+    "crates/coblang-dynload",
+    "crates/coblang-rt-abi",
+    "crates/coblang-screen",
+    "crates/coblang-sort",
+    "crates/coblang-xml-json",
     "tools/scaffold-driver",
     "tools/test-runner",
     "tools/test-importer",
@@ -15,11 +34,36 @@ publish = false
 
 [workspace.dependencies]
 coblang-common = { path = "." }
+coblang-diag = { path = "crates/coblang-diag" }
+coblang-pp = { path = "crates/coblang-pp" }
+coblang-syntax = { path = "crates/coblang-syntax" }
+coblang-hir = { path = "crates/coblang-hir" }
+coblang-sema = { path = "crates/coblang-sema" }
+coblang-decimal = { path = "crates/coblang-decimal" }
+coblang-pic = { path = "crates/coblang-pic" }
+coblang-intrinsics = { path = "crates/coblang-intrinsics" }
+coblang-fileio = { path = "crates/coblang-fileio" }
+coblang-isam = { path = "crates/coblang-isam" }
+coblang-report = { path = "crates/coblang-report" }
+coblang-mlir = { path = "crates/coblang-mlir" }
+coblang-codegen = { path = "crates/coblang-codegen" }
+coblang-rt-core = { path = "crates/coblang-rt-core" }
+coblang-dynload = { path = "crates/coblang-dynload" }
+coblang-rt-abi = { path = "crates/coblang-rt-abi" }
+coblang-screen = { path = "crates/coblang-screen" }
+coblang-sort = { path = "crates/coblang-sort" }
+coblang-xml-json = { path = "crates/coblang-xml-json" }
 coblang-scaffold-driver = { path = "tools/scaffold-driver" }
 coblang-test-runner = { path = "tools/test-runner" }
 coblang-test-importer = { path = "tools/test-importer" }
 derive_more = { version = "2.0.1", default-features = false, features = ["display", "error", "from"] }
+llvm-sys = { version = "201.1.1", features = ["no-llvm-linking"] }
+melior = { version = "0.25.1", default-features = false }
+mlir-sys = "0.5.0"
 regex = "1.11"
+
+[profile.dev]
+debug = 0
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -44,6 +88,11 @@ dbg_macro = "forbid"
 missing_docs_in_private_items = "deny"
 missing_errors_doc = "deny"
 missing_panics_doc = "deny"
+fn_params_excessive_bools = "deny"
+indexing_slicing = "deny"
+fallible_impl_from = "deny"
+try_err = "deny"
+undocumented_unsafe_blocks = "deny"
 
 [package]
 name = "coblang-common"

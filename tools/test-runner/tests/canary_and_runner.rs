@@ -12,16 +12,18 @@ use coblang_common::{
     TextEncoding, WorkspaceFile, encode_manifest_bundle,
 };
 use coblang_test_runner::capabilities::{
-    HostCapabilities, insert_endian_capability, probe_iconv_with_binary,
+    HostCapabilities, IconvProbePolicy, TargetEndianness, insert_endian_capability,
+    probe_iconv_with_binary,
 };
 use coblang_test_runner::cli::{RunnerCommand, parse_runner_cli, resolve_oracle_backend, run_cli};
 use coblang_test_runner::engine::{
-    CompilerBackend, RunnerConfig, TestExecutionRecord, build_driver_cli_args, execute_single_test,
-    execute_suite_parallel,
+    CompilerBackend, RunnerConfig, SandboxRetention, TestExecutionRecord, build_driver_cli_args,
+    execute_single_test, execute_suite_parallel,
 };
 use coblang_test_runner::matcher::{
-    compile_regex, normalize_lines, parse_compiler_diagnostics, parse_single_diagnostic_line,
-    verify_ccvs85_report, verify_compile_diagnostics, verify_output,
+    DiagnosticMessagePolicy, ExcessErrorPolicy, compile_regex, normalize_lines,
+    parse_compiler_diagnostics, parse_single_diagnostic_line, verify_ccvs85_report,
+    verify_compile_diagnostics, verify_output,
 };
 use coblang_test_runner::process::{
     CommandSpec, compile_c_companion, read_optional_pipe, run_command_with_timeout,
@@ -88,21 +90,56 @@ pruned line: error: ignored
 ";
     let parsed = parse_compiler_diagnostics(raw, &[String::from("^pruned line")])?;
     assert_eq!(parsed.len(), 7);
-    assert_eq!(parsed[0].file, "prog.cob");
-    assert_eq!(parsed[0].line, Some(12));
-    assert_eq!(parsed[1].line, Some(18));
-    assert_eq!(parsed[2].line, None);
+    assert_eq!(parsed.first().map(|d| d.file.as_str()), Some("prog.cob"));
+    assert_eq!(parsed.first().and_then(|d| d.line), Some(12));
+    assert_eq!(parsed.get(1).and_then(|d| d.line), Some(18));
+    assert_eq!(parsed.get(2).map(|d| d.line), Some(None));
     assert!(parse_compiler_diagnostics(raw, &[String::from("[")]).is_err());
 
+    verify_bogus_and_message_policies(raw)?;
+    verify_diagnostic_mismatch_cases()?;
+    verify_output_variants()
+}
+
+/// Exercises `dg-bogus`, `dg-prune-output`, and [`DiagnosticMessagePolicy`] combinations.
+///
+/// # Arguments
+///
+/// * `raw` - Sample multi-line compiler diagnostic output.
+fn verify_bogus_and_message_policies(raw: &str) -> Result<()> {
     assert!(
-        verify_compile_diagnostics(raw, &[], &[String::from("invalid PIC")], &[], true, true)?
-            .is_some()
+        verify_compile_diagnostics(
+            raw,
+            &[],
+            &[String::from("invalid PIC")],
+            &[],
+            ExcessErrorPolicy::AllowExcessErrors,
+            DiagnosticMessagePolicy::VerifyMessagePattern,
+        )?
+        .is_some()
     );
     assert!(
-        verify_compile_diagnostics(raw, &[], &[String::from("absent_bogus")], &[], true, true)?
-            .is_none()
+        verify_compile_diagnostics(
+            raw,
+            &[],
+            &[String::from("absent_bogus")],
+            &[],
+            ExcessErrorPolicy::AllowExcessErrors,
+            DiagnosticMessagePolicy::VerifyMessagePattern,
+        )?
+        .is_none()
     );
-    assert!(verify_compile_diagnostics(raw, &[], &[String::from("[")], &[], true, true).is_err());
+    assert!(
+        verify_compile_diagnostics(
+            raw,
+            &[],
+            &[String::from("[")],
+            &[],
+            ExcessErrorPolicy::AllowExcessErrors,
+            DiagnosticMessagePolicy::VerifyMessagePattern,
+        )
+        .is_err()
+    );
 
     let exp = vec![ExpectedDiagnostic {
         file: String::from("prog.cob"),
@@ -111,49 +148,50 @@ pruned line: error: ignored
         message_pattern: String::from("invalid PIC"),
     }];
     assert!(
-        verify_compile_diagnostics(raw, &exp, &[], &[String::from("^pruned")], false, true)?
-            .is_some()
-    );
-    assert!(
         verify_compile_diagnostics(
-            "prog.cob:12:5: error: invalid PIC
-prog.cob:18: warning: ok
-",
+            raw,
             &exp,
             &[],
-            &[],
-            false,
-            true
-        )?
-        .is_none()
-    );
-    assert!(
-        verify_compile_diagnostics(
-            "prog.cob:12:5: error: different wording
-",
-            &exp,
-            &[],
-            &[],
-            false,
-            false
-        )?
-        .is_none()
-    );
-    assert!(
-        verify_compile_diagnostics(
-            "prog.cob:12:5: error: different wording
-",
-            &exp,
-            &[],
-            &[],
-            false,
-            true
+            &[String::from("^pruned")],
+            ExcessErrorPolicy::ForbidExcessErrors,
+            DiagnosticMessagePolicy::VerifyMessagePattern,
         )?
         .is_some()
     );
-
-    verify_diagnostic_mismatch_cases()?;
-    verify_output_variants()
+    assert!(
+        verify_compile_diagnostics(
+            "prog.cob:12:5: error: invalid PIC\nprog.cob:18: warning: ok\n",
+            &exp,
+            &[],
+            &[],
+            ExcessErrorPolicy::ForbidExcessErrors,
+            DiagnosticMessagePolicy::VerifyMessagePattern,
+        )?
+        .is_none()
+    );
+    assert!(
+        verify_compile_diagnostics(
+            "prog.cob:12:5: error: different wording\n",
+            &exp,
+            &[],
+            &[],
+            ExcessErrorPolicy::ForbidExcessErrors,
+            DiagnosticMessagePolicy::IgnoreMessagePattern,
+        )?
+        .is_none()
+    );
+    assert!(
+        verify_compile_diagnostics(
+            "prog.cob:12:5: error: different wording\n",
+            &exp,
+            &[],
+            &[],
+            ExcessErrorPolicy::ForbidExcessErrors,
+            DiagnosticMessagePolicy::VerifyMessagePattern,
+        )?
+        .is_some()
+    );
+    Ok(())
 }
 
 /// Tests file, line, empty-pattern, and malformed-regex diagnostic cases.
@@ -184,8 +222,8 @@ fn verify_diagnostic_mismatch_cases() -> Result<()> {
             &two_diags,
             &[],
             &[],
-            false,
-            true
+            ExcessErrorPolicy::ForbidExcessErrors,
+            DiagnosticMessagePolicy::VerifyMessagePattern,
         )?
         .is_none()
     );
@@ -208,8 +246,8 @@ fn verify_diagnostic_mismatch_cases() -> Result<()> {
                 &spec,
                 &[],
                 &[],
-                true,
-                true
+                ExcessErrorPolicy::AllowExcessErrors,
+                DiagnosticMessagePolicy::VerifyMessagePattern,
             )?
             .is_some()
         );
@@ -220,7 +258,25 @@ fn verify_diagnostic_mismatch_cases() -> Result<()> {
         severity: DiagnosticSeverity::Error,
         message_pattern: String::from("["),
     }];
-    assert!(verify_compile_diagnostics("a:1: error: x", &bad_re, &[], &[], true, true).is_err());
+    assert!(
+        verify_compile_diagnostics(
+            "a:1: error: x",
+            &bad_re,
+            &[],
+            &[],
+            ExcessErrorPolicy::AllowExcessErrors,
+            DiagnosticMessagePolicy::VerifyMessagePattern,
+        )
+        .is_err()
+    );
+    assert_eq!(
+        ExcessErrorPolicy::from_allow_flag(true),
+        ExcessErrorPolicy::AllowExcessErrors
+    );
+    assert_eq!(
+        ExcessErrorPolicy::from_allow_flag(false),
+        ExcessErrorPolicy::ForbidExcessErrors
+    );
     Ok(())
 }
 
@@ -321,6 +377,7 @@ INSPECT NC101A.2
     );
     assert_eq!(verify_ccvs85_report(footer_ok, 93, 2, 4), None);
     assert!(verify_ccvs85_report("   1 TEST(S) FAILED\n", 0, 0, 0).is_some());
+    assert!(verify_ccvs85_report("  IX101A  FAIL*  WRITE-TEST\n", 0, 0, 0).is_some());
     Ok(())
 }
 
@@ -328,13 +385,17 @@ INSPECT NC101A.2
 #[test]
 fn capabilities_and_subprocess_coverage() -> Result<()> {
     let mut set = BTreeSet::new();
-    insert_endian_capability(&mut set, true);
+    insert_endian_capability(&mut set, TargetEndianness::BigEndian);
     assert!(set.contains(&Capability::BigEndian));
-    insert_endian_capability(&mut set, false);
+    insert_endian_capability(&mut set, TargetEndianness::LittleEndian);
     assert!(set.contains(&Capability::LittleEndian));
 
     let host = HostCapabilities::detect_host();
     assert!(host.supports(&Capability::PosixTools));
+    assert!(host.supports(&Capability::CursesPty));
+    assert!(host.supports(&Capability::Isam));
+    assert!(host.supports(&Capability::Xml));
+    assert!(host.supports(&Capability::Json));
     assert!(host.supports(&Capability::IconvCodepage(String::from("UTF-8"))));
     assert!(!host.supports(&Capability::IconvCodepage(String::from(
         "NO_SUCH_CHARSET_999"
@@ -344,7 +405,8 @@ fn capabilities_and_subprocess_coverage() -> Result<()> {
         "UTF-8"
     ));
 
-    let explicit = HostCapabilities::from_explicit(&[Capability::Xml], false);
+    let explicit =
+        HostCapabilities::from_explicit(&[Capability::Xml], IconvProbePolicy::ExplicitOnly);
     assert!(explicit.supports(&Capability::Xml));
     assert!(!explicit.supports(&Capability::IconvCodepage(String::from("UTF-8"))));
     assert_eq!(
@@ -367,6 +429,7 @@ fn capabilities_and_subprocess_coverage() -> Result<()> {
                 env: &[],
                 stdin_bytes: &[],
                 timeout_ms: 500,
+                use_pty: false,
             },
             "bad-spawn"
         )
@@ -474,11 +537,11 @@ fn canary_suite_end_to_end_and_real_cobc_oracle() -> Result<()> {
             compiler_bin: mock_comp,
             cobcrun_bin: Some(mock_cobcrun),
             flavor: DriverFlavor::Coblang,
-            strict_diagnostic_text: true,
-            compile_timeout_ms: 500,
+            diagnostic_policy: DiagnosticMessagePolicy::VerifyMessagePattern,
+            compile_timeout_ms: 1_500,
         },
         sandbox_root: tmp.join("sbx"),
-        preserve_on_failure: true,
+        sandbox_retention: SandboxRetention::PreserveOnFailure,
         c_compiler: PathBuf::from("clang"),
         capabilities: HostCapabilities::detect_host(),
         jobs: 4,
@@ -878,7 +941,7 @@ fn exercise_scaffold_engine_branches(tmp: &Path) -> Result<()> {
     let scaf_cfg = RunnerConfig {
         backend: CompilerBackend::InProcessScaffold,
         sandbox_root: tmp.join("sbx"),
-        preserve_on_failure: false,
+        sandbox_retention: SandboxRetention::CleanAlways,
         c_compiler: PathBuf::from("clang"),
         capabilities: HostCapabilities::detect_host(),
         jobs: 1,
@@ -1146,7 +1209,7 @@ fn exercise_real_cobc_oracle(tmp: &Path) -> Result<()> {
     let cfg = RunnerConfig {
         backend: resolve_oracle_backend(Some("cobc"))?,
         sandbox_root: tmp.join("oracle-sbx"),
-        preserve_on_failure: false,
+        sandbox_retention: SandboxRetention::CleanAlways,
         c_compiler: PathBuf::from("clang"),
         capabilities: HostCapabilities::detect_host(),
         jobs: 1,
@@ -1289,6 +1352,9 @@ fn exercise_cli_parser_errors() -> Result<()> {
         &["run", "--baseline"][..],
         &["run", "--write-baseline"][..],
         &["run", "--oracle"][..],
+        &["run", "--filter"][..],
+        &["run", "--tag"][..],
+        &["run", "--tag", "bad:tag", "--bundle", "a"][..],
         &["run", "--jobs"][..],
         &["run", "--jobs", "x", "--bundle", "a"][..],
         &["run", "--bad"][..],
@@ -1301,6 +1367,9 @@ fn exercise_cli_parser_errors() -> Result<()> {
         &["summary", "--bundle-dir"][..],
         &["summary", "--output"][..],
         &["summary", "--json"][..],
+        &["summary", "--filter"][..],
+        &["summary", "--tag"][..],
+        &["summary", "--tag", "bad:tag", "--bundle", "a"][..],
         &["summary", "--jobs"][..],
         &["summary", "--jobs", "x", "--bundle", "a"][..],
         &["summary", "--bad"][..],
@@ -1319,21 +1388,33 @@ fn build_cli_fixture_bundle(tmp: &Path) -> Result<(PathBuf, Vec<TestManifest>)> 
     let bundle = tmp.join("b.bundle");
     let mut skip_m = simple_canary("flat_skip", "OK", Some("xf"), Vec::new(), None, Vec::new());
     skip_m.skip_reason = Some(String::from("sk"));
-    let manifests = vec![
-        simple_canary(
-            "sub/t1",
-            "OK",
-            None,
-            Vec::new(),
-            None,
-            vec![TestStep::CompileCobol(base_cobol_spec(
-                CompilationMode::SyntaxOnly,
-                "prog.cob",
-                "a.o",
-            ))],
-        ),
-        skip_m,
-    ];
+    let mut tagged = simple_canary(
+        "sub/t1",
+        "OK",
+        None,
+        Vec::new(),
+        None,
+        vec![TestStep::CompileCobol(base_cobol_spec(
+            CompilationMode::SyntaxOnly,
+            "prog.cob",
+            "a.o",
+        ))],
+    );
+    tagged.feature_tags = vec![FeatureTag::StageParseSema];
+    let mut untagged = simple_canary(
+        "sub/t2",
+        "OK",
+        None,
+        Vec::new(),
+        None,
+        vec![TestStep::CompileCobol(base_cobol_spec(
+            CompilationMode::SyntaxOnly,
+            "prog.cob",
+            "b.o",
+        ))],
+    );
+    untagged.feature_tags = vec![FeatureTag::FeatureArith];
+    let manifests = vec![tagged, untagged, skip_m];
     std::fs::write(&bundle, encode_manifest_bundle(&manifests))?;
     Ok((bundle, manifests))
 }
@@ -1404,7 +1485,30 @@ fn exercise_cli_dispatch_and_binary() -> Result<()> {
             ]),
             0,
         ),
-        (s(&["summary", "--bundle", &b_str]), 0),
+        (
+            s(&[
+                "summary",
+                "--bundle",
+                &b_str,
+                "--filter",
+                "sub/",
+                "--tag",
+                "stage:parse-sema",
+            ]),
+            0,
+        ),
+        (
+            s(&[
+                "run",
+                "--bundle",
+                &b_str,
+                "--filter",
+                "sub/",
+                "--tag",
+                "stage:parse-sema",
+            ]),
+            0,
+        ),
         (
             s(&["emit-lit", "--bundle", &b_str, "--out-dir", &lit_str]),
             0,
@@ -1412,12 +1516,302 @@ fn exercise_cli_dispatch_and_binary() -> Result<()> {
     ] {
         assert_eq!(run_cli(&args, &tmp, &mut out, &mut err), code);
     }
-    assert_eq!(emit_lit_wrappers(&manifests, &bundle, &lit_dir)?, 2);
+    assert_eq!(emit_lit_wrappers(&manifests, &bundle, &lit_dir)?, 3);
 
     let bin_out = Command::new(env!("CARGO_BIN_EXE_coblang-test"))
         .arg("--help")
         .output()?;
     assert!(bin_out.status.success());
+
+    std::fs::remove_dir_all(&tmp)?;
+    Ok(())
+}
+
+/// Writes an executable shell script at `dir.join(name)` and returns its path.
+fn write_exec_script(dir: &Path, name: &str, body: &str) -> Result<PathBuf> {
+    let path = dir.join(name);
+    std::fs::write(&path, body)?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+    Ok(path)
+}
+
+/// Builds synthetic `UNIMPL`, standalone `./a.out`, and `via_cobcrun` manifests for `CoblangCompiled` testing.
+fn build_compiled_backend_manifests() -> (TestManifest, TestManifest, TestManifest) {
+    let unimpl_m = simple_canary(
+        "comp/unimpl",
+        "UNIMPL",
+        None,
+        Vec::new(),
+        None,
+        vec![TestStep::CompileCobol(base_cobol_spec(
+            CompilationMode::SyntaxOnly,
+            "prog.cob",
+            "a.o",
+        ))],
+    );
+    let exe_m = simple_canary(
+        "comp/exe",
+        "STANDALONE",
+        None,
+        Vec::new(),
+        None,
+        vec![
+            TestStep::CompileCobol(base_cobol_spec(
+                CompilationMode::BuildExecutable,
+                "prog.cob",
+                "a.out",
+            )),
+            TestStep::RunBinary(RunBinarySpec {
+                target: String::from("./a.out"),
+                via_cobcrun: false,
+                args: Vec::new(),
+                stdin: Vec::new(),
+                env: Vec::new(),
+                expected_exit_code: 0,
+                stdout: OutputMatcher::Exact(String::from("EXE_OK")),
+                stderr: OutputMatcher::Ignore,
+                expected_files: Vec::new(),
+                timeout_ms: 2_000,
+            }),
+        ],
+    );
+    let mod_m = simple_canary(
+        "comp/mod",
+        "OK",
+        None,
+        Vec::new(),
+        None,
+        vec![
+            TestStep::CompileCobol(base_cobol_spec(
+                CompilationMode::CompileModule,
+                "prog.cob",
+                "MOD.so",
+            )),
+            TestStep::RunBinary(RunBinarySpec {
+                target: String::from("MOD"),
+                via_cobcrun: true,
+                args: Vec::new(),
+                stdin: Vec::new(),
+                env: Vec::new(),
+                expected_exit_code: 0,
+                stdout: OutputMatcher::Exact(String::from("MOD_OK")),
+                stderr: OutputMatcher::Ignore,
+                expected_files: Vec::new(),
+                timeout_ms: 2_000,
+            }),
+        ],
+    );
+    (unimpl_m, exe_m, mod_m)
+}
+
+/// Exercises `CompilerBackend::CoblangCompiled` across compile, standalone `./a.out`, and `via_cobcrun` module execution.
+#[test]
+fn coblang_compiled_backend_coverage() -> Result<()> {
+    assert_eq!(coblang_test_runner::runner_smoke_check()?, 78);
+    let tmp = std::env::temp_dir().join(format!("coblang-comp-be-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp)?;
+
+    let mock_comp = write_exec_script(
+        &tmp,
+        "mock_coblang.sh",
+        "#!/bin/sh\u{000a}if grep -q UNIMPL prog.cob; then exit 78; fi\u{000a}if [ -f prog.cob ] && grep -q STANDALONE prog.cob; then printf '#!/bin/sh\\nprintf \"EXE_OK\"\\nexit 0\\n' > a.out; chmod +x a.out; fi\u{000a}exit 0\u{000a}",
+    )?;
+    let mock_cobcrun_78 = write_exec_script(
+        &tmp,
+        "mock_cobcrun_78.sh",
+        "#!/bin/sh\u{000a}echo unimpl >&2; exit 78\u{000a}",
+    )?;
+    let mock_cobcrun_0 = write_exec_script(
+        &tmp,
+        "mock_cobcrun_0.sh",
+        "#!/bin/sh\u{000a}printf 'MOD_OK'\u{000a}exit 0\u{000a}",
+    )?;
+
+    let (unimpl_m, exe_m, mod_m) = build_compiled_backend_manifests();
+
+    let mk_cfg = |cobcrun_bin| RunnerConfig {
+        backend: CompilerBackend::CoblangCompiled {
+            compiler_bin: mock_comp.clone(),
+            cobcrun_bin,
+            compile_timeout_ms: 5_000,
+        },
+        sandbox_root: tmp.clone(),
+        sandbox_retention: SandboxRetention::CleanAlways,
+        c_compiler: PathBuf::from("clang"),
+        capabilities: HostCapabilities::detect_host(),
+        jobs: 1,
+    };
+    let cfg_78 = mk_cfg(mock_cobcrun_78);
+    assert_eq!(
+        execute_single_test(&unimpl_m, &cfg_78, 0)?.outcome,
+        TestOutcome::XFail
+    );
+    assert_eq!(
+        execute_single_test(&mod_m, &cfg_78, 1)?.outcome,
+        TestOutcome::XFail
+    );
+
+    let cfg_0 = mk_cfg(mock_cobcrun_0);
+    assert_eq!(
+        execute_single_test(&exe_m, &cfg_0, 2)?.outcome,
+        TestOutcome::Pass
+    );
+    assert_eq!(
+        execute_single_test(&mod_m, &cfg_0, 3)?.outcome,
+        TestOutcome::Pass
+    );
+
+    std::fs::remove_dir_all(&tmp)?;
+    Ok(())
+}
+
+/// Exercises `read_optional_pipe_bounded` truncation and `InProcessCompiler` `XFail` paths.
+#[test]
+fn inprocess_backend_missing_bin_and_bounded_pipe_coverage() -> Result<()> {
+    let tmp = std::env::temp_dir().join(format!("coblang-inproc-be-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp)?;
+
+    // Exercise `read_optional_pipe_bounded` truncation and draining when output exceeds `max_bytes`.
+    let (capped, truncated) =
+        coblang_test_runner::process::read_optional_pipe_bounded(Some(&b"0123456789ABCDEF"[..]), 4);
+    assert!(truncated);
+    assert_eq!(capped, b"0123");
+    assert_eq!(
+        coblang_test_runner::process::read_optional_pipe_bounded::<&[u8]>(None, 4),
+        (Vec::new(), false)
+    );
+    assert!(
+        compile_c_companion(
+            &CompileCSpec {
+                sources: vec![String::from("missing.c")],
+                output: String::from("missing.o"),
+                shared: false,
+            },
+            &tmp,
+            Path::new("/nonexistent/coblang_missing_cc"),
+            1_000,
+            "comp/missing_cc",
+        )
+        .is_err()
+    );
+
+    // Exercise `InProcessCompiler` soft assertion mismatch -> `XFail` and missing target binary in `RunBinary`.
+    let inproc_cfg = RunnerConfig {
+        backend: CompilerBackend::InProcessCompiler,
+        sandbox_root: tmp.clone(),
+        sandbox_retention: SandboxRetention::CleanAlways,
+        c_compiler: PathBuf::from("clang"),
+        capabilities: HostCapabilities::detect_host(),
+        jobs: 1,
+    };
+    let missing_bin_m = simple_canary(
+        "comp/missing_bin",
+        "       IDENTIFICATION DIVISION.\u{000a}       PROGRAM-ID. MB.\u{000a}",
+        None,
+        Vec::new(),
+        None,
+        vec![
+            TestStep::CompileCobol(base_cobol_spec(
+                CompilationMode::SyntaxOnly,
+                "prog.cob",
+                "mb.o",
+            )),
+            TestStep::RunBinary(RunBinarySpec {
+                target: String::from("./does_not_exist"),
+                via_cobcrun: false,
+                args: Vec::new(),
+                stdin: Vec::new(),
+                env: Vec::new(),
+                expected_exit_code: 0,
+                stdout: OutputMatcher::Ignore,
+                stderr: OutputMatcher::Ignore,
+                expected_files: Vec::new(),
+                timeout_ms: 1_000,
+            }),
+        ],
+    );
+    assert_eq!(
+        execute_single_test(&missing_bin_m, &inproc_cfg, 3)?.outcome,
+        TestOutcome::XFail
+    );
+    let xfail_annot_m = simple_canary(
+        "comp/xfail_annot",
+        "       IDENTIFICATION DIVISION.\u{000a}       PROGRAM-ID. XF.\u{000a}       PROCEDURE DIVISION.\u{000a}       P1.\u{000a}           BOGUSVERB X.\u{000a}",
+        Some("known"),
+        Vec::new(),
+        None,
+        vec![TestStep::CompileCobol(base_cobol_spec(
+            CompilationMode::SyntaxOnly,
+            "prog.cob",
+            "xf.o",
+        ))],
+    );
+    assert_eq!(
+        execute_single_test(&xfail_annot_m, &inproc_cfg, 4)?.outcome,
+        TestOutcome::XFail
+    );
+
+    let cobcrun_inproc_m = simple_canary(
+        "comp/inproc_cobcrun",
+        "       IDENTIFICATION DIVISION.\u{000a}       PROGRAM-ID. IC.\u{000a}       PROCEDURE DIVISION.\u{000a}           STOP RUN.\u{000a}",
+        None,
+        Vec::new(),
+        None,
+        vec![TestStep::RunBinary(RunBinarySpec {
+            target: String::from("NO_SUCH_MOD"),
+            via_cobcrun: true,
+            args: Vec::new(),
+            stdin: Vec::new(),
+            env: Vec::new(),
+            expected_exit_code: 0,
+            stdout: OutputMatcher::Ignore,
+            stderr: OutputMatcher::Ignore,
+            expected_files: Vec::new(),
+            timeout_ms: 2_000,
+        })],
+    );
+    let _ = execute_single_test(&cobcrun_inproc_m, &inproc_cfg, 5);
+
+    std::fs::remove_dir_all(&tmp)?;
+    Ok(())
+}
+
+/// Verifies [`coblang_test_runner::engine::locate_cobcrun_shim`] across missing, parent, and direct shim paths.
+#[test]
+fn locate_cobcrun_shim_paths_coverage() -> Result<()> {
+    let tmp = std::env::temp_dir().join(format!("coblang-shim-loc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let shim_sub = tmp.join("deps");
+    std::fs::create_dir_all(&shim_sub)?;
+
+    assert_eq!(
+        coblang_test_runner::engine::locate_cobcrun_shim(None),
+        PathBuf::from("cobcrun-shim")
+    );
+    assert_eq!(
+        coblang_test_runner::engine::locate_cobcrun_shim(Some(Path::new("/"))),
+        PathBuf::from("cobcrun-shim")
+    );
+    assert_eq!(
+        coblang_test_runner::engine::locate_cobcrun_shim(Some(Path::new("/single_level"))),
+        PathBuf::from("cobcrun-shim")
+    );
+    assert_eq!(
+        coblang_test_runner::engine::locate_cobcrun_shim(Some(&shim_sub.join("runner"))),
+        PathBuf::from("cobcrun-shim")
+    );
+    let up_shim = tmp.join("cobcrun-shim");
+    std::fs::write(&up_shim, b"")?;
+    assert_eq!(
+        coblang_test_runner::engine::locate_cobcrun_shim(Some(&shim_sub.join("runner"))),
+        up_shim
+    );
+    let direct_shim = shim_sub.join("cobcrun-shim");
+    std::fs::write(&direct_shim, b"")?;
+    assert_eq!(
+        coblang_test_runner::engine::locate_cobcrun_shim(Some(&shim_sub.join("runner"))),
+        direct_shim
+    );
 
     std::fs::remove_dir_all(&tmp)?;
     Ok(())
